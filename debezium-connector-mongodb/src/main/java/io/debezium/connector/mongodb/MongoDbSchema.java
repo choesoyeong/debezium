@@ -12,9 +12,11 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
 
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
+import org.bson.BsonDocument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -56,9 +58,15 @@ public class MongoDbSchema implements DatabaseSchema<CollectionId> {
     private final ConcurrentMap<CollectionId, MongoDbCollectionSchema> collections = new ConcurrentHashMap<>();
     private final JsonSerialization serialization;
     private final MongoDbTaskContext taskContext;
+    private final ShardKeys shardKeys;
 
     public MongoDbSchema(MongoDbConnectorConfig config, MongoDbTaskContext taskContext, TopicNamingStrategy<CollectionId> topicNamingStrategy, Schema sourceSchema,
                          SchemaNameAdjuster schemaNameAdjuster) {
+        this(config, taskContext, topicNamingStrategy, sourceSchema, schemaNameAdjuster, ShardKeys.unsharded());
+    }
+
+    public MongoDbSchema(MongoDbConnectorConfig config, MongoDbTaskContext taskContext, TopicNamingStrategy<CollectionId> topicNamingStrategy, Schema sourceSchema,
+                         SchemaNameAdjuster schemaNameAdjuster, ShardKeys shardKeys) {
         this.config = config;
         this.filters = taskContext.getFilters();
         this.topicNamingStrategy = topicNamingStrategy;
@@ -66,6 +74,7 @@ public class MongoDbSchema implements DatabaseSchema<CollectionId> {
         this.adjuster = schemaNameAdjuster;
         this.serialization = new JsonSerialization(config.getJsonSerializationMode());
         this.taskContext = taskContext;
+        this.shardKeys = shardKeys;
     }
 
     @Override
@@ -107,12 +116,36 @@ public class MongoDbSchema implements DatabaseSchema<CollectionId> {
                     id,
                     fieldFilter,
                     keySchema,
-                    serialization::getDocumentId,
+                    keyGeneratorFor(id),
+                    documentKeyGeneratorFor(),
                     envelope,
                     valueSchema,
                     serialization::getDocumentValue,
                     serialization::getUpdatedFields);
         });
+    }
+
+    /**
+     * Builds the key generator used for full documents read during a snapshot. In
+     * {@link MongoDbConnectorConfig.ChangeEventKeyMode#DOCUMENT_KEY} mode the document key has to be reconstructed from
+     * the shard key, because a document read straight from the collection carries no {@code documentKey}.
+     */
+    private Function<BsonDocument, Object> keyGeneratorFor(CollectionId collectionId) {
+        if (config.getChangeEventKeyMode() == MongoDbConnectorConfig.ChangeEventKeyMode.ID) {
+            return serialization::getDocumentId;
+        }
+        return document -> serialization.getDocumentKey(ShardKeys.documentKeyOf(document, shardKeys.shardKeyPathsFor(collectionId)));
+    }
+
+    /**
+     * Builds the key generator used for the {@code documentKey} of a change stream event, which already holds exactly
+     * the fields that identify the document.
+     */
+    private Function<BsonDocument, Object> documentKeyGeneratorFor() {
+        if (config.getChangeEventKeyMode() == MongoDbConnectorConfig.ChangeEventKeyMode.ID) {
+            return serialization::getDocumentId;
+        }
+        return serialization::getDocumentKey;
     }
 
     @Override

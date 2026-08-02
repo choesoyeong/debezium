@@ -38,11 +38,13 @@ public class MongoDbCollectionSchema implements DataCollectionSchema {
     private final Envelope envelopeSchema;
     private final Schema valueSchema;
     private final Function<BsonDocument, Object> keyGenerator;
+    private final Function<BsonDocument, Object> documentKeyGenerator;
     private final Function<BsonDocument, String> valueGenerator;
     private final Function<BsonDocument, String> updatedFieldsGenerator;
 
     public MongoDbCollectionSchema(CollectionId id, FieldFilter fieldFilter, Schema keySchema,
-                                   Function<BsonDocument, Object> keyGenerator, Envelope envelopeSchema, Schema valueSchema,
+                                   Function<BsonDocument, Object> keyGenerator, Function<BsonDocument, Object> documentKeyGenerator,
+                                   Envelope envelopeSchema, Schema valueSchema,
                                    Function<BsonDocument, String> valueGenerator, Function<BsonDocument, String> updatedFieldsGenerator) {
         this.id = id;
         this.fieldFilter = fieldFilter;
@@ -50,6 +52,7 @@ public class MongoDbCollectionSchema implements DataCollectionSchema {
         this.envelopeSchema = envelopeSchema;
         this.valueSchema = valueSchema;
         this.keyGenerator = keyGenerator != null ? keyGenerator : (BsonDocument) -> null;
+        this.documentKeyGenerator = documentKeyGenerator != null ? documentKeyGenerator : this.keyGenerator;
         this.valueGenerator = valueGenerator != null ? valueGenerator : (BsonDocument) -> null;
         this.updatedFieldsGenerator = updatedFieldsGenerator != null ? updatedFieldsGenerator : (BsonDocument) -> null;
     }
@@ -73,8 +76,23 @@ public class MongoDbCollectionSchema implements DataCollectionSchema {
         return envelopeSchema;
     }
 
+    /**
+     * Builds the change event key from a full collection document, as read during a snapshot.
+     *
+     * @param document the full document; may be null
+     */
     public Struct keyFromDocument(BsonDocument document) {
         return document == null ? null : new Struct(keySchema).put("id", keyGenerator.apply(document));
+    }
+
+    /**
+     * Builds the change event key from a change stream {@code documentKey}, which already holds exactly the fields that
+     * identify the document.
+     *
+     * @param documentKey the change stream document key; may be null
+     */
+    public Struct keyFromDocumentKey(BsonDocument documentKey) {
+        return documentKey == null ? null : new Struct(keySchema).put("id", documentKeyGenerator.apply(documentKey));
     }
 
     public Struct valueFromDocumentSnapshot(BsonDocument document, Envelope.Operation operation) {

@@ -89,6 +89,20 @@ class JsonSerialization {
         return keyValue.substring(start, end);
     }
 
+    /**
+     * Serializes a change stream {@code documentKey} in full, that is the shard key fields followed by {@code _id} for
+     * a sharded collection and just {@code _id} otherwise.
+     *
+     * @param documentKey the document key; may be null
+     * @return the serialized document key, or null if {@code documentKey} is null
+     */
+    public String getDocumentKey(BsonDocument documentKey) {
+        if (documentKey == null) {
+            return null;
+        }
+        return documentKey.toJson(SIMPLE_JSON_SETTINGS);
+    }
+
     public String getDocumentValue(BsonDocument document) {
         return transformer.apply(document);
     }

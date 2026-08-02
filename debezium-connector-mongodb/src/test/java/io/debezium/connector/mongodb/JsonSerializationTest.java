@@ -10,6 +10,7 @@ import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonObjectId;
 import org.bson.BsonString;
+import org.bson.types.ObjectId;
 import org.junit.jupiter.api.Test;
 
 public class JsonSerializationTest {
@@ -38,6 +39,41 @@ public class JsonSerializationTest {
         var compositeKey = serialization.getDocumentId(composite);
 
         Assertions.assertThat(compositeKey).isEqualTo(simpleKey);
+    }
+
+    @Test
+    void shouldKeepWholeDocumentKeyOfShardedCollection() {
+        var documentKey = new BsonDocument("caseNo", new BsonString("201907130000200001"))
+                .append("_id", new BsonObjectId(new ObjectId("5d2974673484856dfa2b909a")));
+
+        var key = serialization.getDocumentKey(documentKey);
+
+        // The key uses the compact writer settings, so fields are separated by ',' without a trailing space
+        Assertions.assertThat(key).isEqualTo("{\"caseNo\": \"201907130000200001\",\"_id\": {\"$oid\": \"5d2974673484856dfa2b909a\"}}");
+    }
+
+    @Test
+    void shouldKeepWholeDocumentKeyOfUnshardedCollection() {
+        var documentKey = new BsonDocument("_id", new BsonObjectId(new ObjectId("5d2974673484856dfa2b909a")));
+
+        var key = serialization.getDocumentKey(documentKey);
+
+        Assertions.assertThat(key).isEqualTo("{\"_id\": {\"$oid\": \"5d2974673484856dfa2b909a\"}}");
+    }
+
+    @Test
+    void shouldDistinguishSameIdOnDifferentShards() {
+        var id = new BsonString("duplicate-id");
+        var onShardA = new BsonDocument("tenant", new BsonString("a")).append("_id", id);
+        var onShardB = new BsonDocument("tenant", new BsonString("b")).append("_id", id);
+
+        Assertions.assertThat(serialization.getDocumentId(onShardA)).isEqualTo(serialization.getDocumentId(onShardB));
+        Assertions.assertThat(serialization.getDocumentKey(onShardA)).isNotEqualTo(serialization.getDocumentKey(onShardB));
+    }
+
+    @Test
+    void shouldReturnNullDocumentKeyForNullInput() {
+        Assertions.assertThat(serialization.getDocumentKey(null)).isNull();
     }
 
     @Test
