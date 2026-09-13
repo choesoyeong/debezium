@@ -23,12 +23,8 @@ import io.debezium.DebeziumException;
 
 /**
  * Resolves the shard key of a sharded collection and reproduces the change stream {@code documentKey} of a document
- * from it.
- * <p>
- * MongoDB reports a {@code documentKey} on every change stream event. For an unsharded collection it holds just
- * {@code _id}; for a sharded collection it holds the shard key fields followed by {@code _id}. Snapshot events are read
- * straight from the collection and therefore carry no {@code documentKey}, so the same value has to be derived from the
- * full document in order for snapshot and streaming events of one document to share a key.
+ * from it. A change stream event carries its {@code documentKey}, but a document read during a snapshot does not, so
+ * the same value has to be derived from the full document for both to share a key.
  *
  * @author Soyeong Choe
  */
@@ -43,37 +39,35 @@ public class ShardKeys {
     private static final String DROPPED_FIELD = "dropped";
 
     /**
-     * Shard key paths per collection. An empty list means "not sharded"; a collection whose shard key cannot be
-     * determined is reported rather than cached, so an entry never stands for an unknown shard key.
+     * Shard key paths per collection; an empty list means the collection is not sharded.
      */
     private final Map<CollectionId, List<String>> shardKeyPaths = new ConcurrentHashMap<>();
     private final Supplier<MongoClient> clientSupplier;
 
     /**
-     * @param clientSupplier supplies a client used to read {@code config.collections}; may be null, in which case every
-     *            collection is treated as unsharded
+     * @param clientSupplier supplies a client used to read {@code config.collections}; may be null, in which case
+     *            every collection is treated as unsharded
      */
     public ShardKeys(Supplier<MongoClient> clientSupplier) {
         this.clientSupplier = clientSupplier;
     }
 
     /**
-     * Returns a {@link ShardKeys} instance that treats every collection as unsharded. Useful where no connection is
-     * available and the {@code documentKey} therefore degenerates to {@code _id}.
+     * Returns an instance that treats every collection as unsharded, for use where no connection is available.
+     *
+     * @return the shard keys; never null
      */
     public static ShardKeys unsharded() {
         return new ShardKeys(null);
     }
 
     /**
-     * Returns the shard key field paths of the given collection, in shard key order, or an empty list if the collection
-     * is not sharded.
-     * <p>
-     * The result is cached for the lifetime of this instance, so enabling sharding on a collection while the connector
-     * is running is not picked up until the task restarts.
+     * Get the shard key field paths of the given collection, in shard key order. The result is cached until the task
+     * restarts.
      *
-     * @throws io.debezium.DebeziumException if {@code config.collections} cannot be read, or if it holds an entry for
-     *             the collection that carries no usable shard key
+     * @param collectionId the collection; may not be null
+     * @return the shard key paths, or an empty list if the collection is not sharded; never null
+     * @throws io.debezium.DebeziumException if the shard key cannot be determined
      */
     public List<String> shardKeyPathsFor(CollectionId collectionId) {
         if (clientSupplier == null) {
@@ -106,16 +100,11 @@ public class ShardKeys {
     }
 
     /**
-     * Extracts the shard key field paths from a {@code config.collections} entry.
-     * <p>
-     * A missing entry means the collection is not sharded, so its document key is {@code _id} alone. An entry that
-     * carries no usable shard key is reported instead: it says the collection is sharded without saying what the
-     * shard key is, and falling back to {@code _id} there would emit a key that does not match the change stream
-     * documentKey of the same document.
+     * Extract the shard key field paths from a {@code config.collections} entry.
      *
-     * @param entry the {@code config.collections} entry of the collection; may be null
-     * @param collectionId the collection the entry was read for; used for reporting
-     * @return the shard key field paths in shard key order, or an empty list if the collection is not sharded
+     * @param entry the entry read for the collection; may be null, meaning the collection is not sharded
+     * @param collectionId the collection the entry was read for; may not be null
+     * @return the shard key paths in shard key order, or an empty list if the collection is not sharded; never null
      * @throws io.debezium.DebeziumException if the entry carries no usable shard key
      */
     static List<String> shardKeyPathsOf(Document entry, CollectionId collectionId) {
@@ -167,8 +156,7 @@ public class ShardKeys {
     }
 
     /**
-     * Resolves a possibly dotted shard key path such as {@code address.zip} against a document. MongoDB reports such a
-     * field under its dotted name in the {@code documentKey}, so the path is used verbatim as the key name.
+     * Resolves a possibly dotted shard key path such as {@code address.zip} against a document.
      */
     private static BsonValue resolve(BsonDocument document, String path) {
         if (path.indexOf('.') < 0) {

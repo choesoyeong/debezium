@@ -125,11 +125,6 @@ public class MongoDbSchema implements DatabaseSchema<CollectionId> {
         });
     }
 
-    /**
-     * Builds the key generator used for full documents read during a snapshot. In
-     * {@link MongoDbConnectorConfig.ChangeEventKeyMode#DOCUMENT_KEY} mode the document key has to be reconstructed from
-     * the shard key, because a document read straight from the collection carries no {@code documentKey}.
-     */
     private Function<BsonDocument, Object> keyGeneratorFor(CollectionId collectionId) {
         if (config.getChangeEventKeyMode() == MongoDbConnectorConfig.ChangeEventKeyMode.ID) {
             return serialization::getDocumentId;
@@ -137,10 +132,6 @@ public class MongoDbSchema implements DatabaseSchema<CollectionId> {
         return document -> serialization.getDocumentKey(ShardKeys.documentKeyOf(document, shardKeys.shardKeyPathsFor(collectionId)));
     }
 
-    /**
-     * Builds the key generator used for the {@code documentKey} of a change stream event, which already holds exactly
-     * the fields that identify the document.
-     */
     private Function<BsonDocument, Object> documentKeyGeneratorFor() {
         if (config.getChangeEventKeyMode() == MongoDbConnectorConfig.ChangeEventKeyMode.ID) {
             return serialization::getDocumentId;

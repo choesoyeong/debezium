@@ -76,21 +76,10 @@ public class MongoDbCollectionSchema implements DataCollectionSchema {
         return envelopeSchema;
     }
 
-    /**
-     * Builds the change event key from a full collection document, as read during a snapshot.
-     *
-     * @param document the full document; may be null
-     */
     public Struct keyFromDocument(BsonDocument document) {
         return document == null ? null : new Struct(keySchema).put("id", keyGenerator.apply(document));
     }
 
-    /**
-     * Builds the change event key from a change stream {@code documentKey}, which already holds exactly the fields that
-     * identify the document.
-     *
-     * @param documentKey the change stream document key; may be null
-     */
     public Struct keyFromDocumentKey(BsonDocument documentKey) {
         return documentKey == null ? null : new Struct(keySchema).put("id", documentKeyGenerator.apply(documentKey));
     }
