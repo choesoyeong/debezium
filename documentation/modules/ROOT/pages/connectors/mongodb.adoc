@@ -650,7 +650,7 @@ endif::product[]
 [[mongodb-change-events-key]]
 === Change event keys
 
-A change event's key contains the schema for the changed document's key and the changed document's actual key. For a given collection, both the schema and its corresponding payload contain a single `id` field.
+A change event's key contains the schema for the changed document's key and the changed document's actual key. For a given collection, both the schema and its corresponding payload contain a single field, named `id` by default.
 The value of this field is the document's identifier represented as a string that is derived from link:https://docs.mongodb.com/manual/reference/mongodb-extended-json/[MongoDB extended JSON serialization strict mode].
 
 Consider a connector with a logical name of `fulfillment`, a replica set containing an `inventory` database, and a `customers` collection that contains documents such as the following.
@@ -742,14 +742,14 @@ If a collection uses a custom `_id` instead of the default `ObjectId`, documents
 Because the connector derives the change event key from `_id` by default, those documents produce identical record keys.
 
 To make the key unique across the cluster, set xref:mongodb-property-change-event-key-mode[`change.event.key.mode`] to `document_key`.
-The connector then uses the change stream `documentKey`, which for a sharded collection consists of the shard key followed by `_id`.
+The connector then uses the change stream `documentKey`, which for a sharded collection consists of the shard key followed by `_id`, and names the key field `documentKey` instead of `id`.
 For a collection that is sharded on `caseNo`, the key payload changes as follows:
 
 [source,json,indent=0]
 ----
   {
     "payload": {
-      "id": "{\"caseNo\": \"201907130000200001\", \"_id\": {\"$oid\": \"5d2974673484856dfa2b909a\"}}"
+      "documentKey": "{\"caseNo\": \"201907130000200001\",\"_id\": {\"$oid\": \"5d2974673484856dfa2b909a\"}}"
     }
   }
 ----
@@ -1860,8 +1860,6 @@ The key of a document also changes if you enable sharding on a collection that a
 In `document_key` mode, the connector reads the shard key of each captured collection from the `config.collections` collection so that snapshot events and streaming events for the same document share a key.
 The database user that the connector uses must be able to read `config.collections`; otherwise the connector fails.
 The connector also fails if the entry that it reads for a sharded collection carries no shard key, rather than falling back to `_id`, because such a key would not match the `documentKey` that the change stream reports for the same document.
-Do not combine `document_key` with the {link-prefix}:{link-mongodb-event-flattening}[event flattening SMT] yet.
-Where that SMT copies the record key into the `_id` field of the payload, which it does for rewritten deletes and for partial updates, it writes the whole document key rather than the `_id` that the key carries.
 ====
 
 |[[mongodb-property-capture-start-op-time]]<<mongodb-property-capture-start-op-time, `+capture.start.op.time+`>>

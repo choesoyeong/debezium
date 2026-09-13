@@ -89,7 +89,7 @@ public class MongoDbSchema implements DatabaseSchema<CollectionId> {
 
             final Schema keySchema = SchemaBuilder.struct()
                     .name(adjuster.adjust(topicName + ".Key"))
-                    .field("id", Schema.STRING_SCHEMA)
+                    .field(keyFieldName(), Schema.STRING_SCHEMA)
                     .build();
 
             final Schema valueSchema = SchemaBuilder.struct()
@@ -123,6 +123,13 @@ public class MongoDbSchema implements DatabaseSchema<CollectionId> {
                     serialization::getDocumentValue,
                     serialization::getUpdatedFields);
         });
+    }
+
+    private String keyFieldName() {
+        if (config.getChangeEventKeyMode() == MongoDbConnectorConfig.ChangeEventKeyMode.ID) {
+            return MongoDbFieldName.ID;
+        }
+        return MongoDbFieldName.DOCUMENT_KEY;
     }
 
     private Function<BsonDocument, Object> keyGeneratorFor(CollectionId collectionId) {

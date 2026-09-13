@@ -13,6 +13,8 @@ import org.bson.BsonString;
 import org.bson.types.ObjectId;
 import org.junit.jupiter.api.Test;
 
+import io.debezium.doc.FixFor;
+
 public class JsonSerializationTest {
 
     private JsonSerialization serialization = new JsonSerialization(MongoDbConnectorConfig.JsonSerializationMode.LEGACY);
@@ -42,6 +44,7 @@ public class JsonSerializationTest {
     }
 
     @Test
+    @FixFor("DBZ-2337")
     void shouldKeepWholeDocumentKeyOfShardedCollection() {
         var documentKey = new BsonDocument("caseNo", new BsonString("201907130000200001"))
                 .append("_id", new BsonObjectId(new ObjectId("5d2974673484856dfa2b909a")));
@@ -53,6 +56,7 @@ public class JsonSerializationTest {
     }
 
     @Test
+    @FixFor("DBZ-2337")
     void shouldKeepWholeDocumentKeyOfUnshardedCollection() {
         var documentKey = new BsonDocument("_id", new BsonObjectId(new ObjectId("5d2974673484856dfa2b909a")));
 
@@ -62,6 +66,7 @@ public class JsonSerializationTest {
     }
 
     @Test
+    @FixFor("DBZ-2337")
     void shouldDistinguishSameIdOnDifferentShards() {
         var id = new BsonString("duplicate-id");
         var onShardA = new BsonDocument("tenant", new BsonString("a")).append("_id", id);
@@ -72,6 +77,7 @@ public class JsonSerializationTest {
     }
 
     @Test
+    @FixFor("DBZ-2337")
     void shouldReturnNullDocumentKeyForNullInput() {
         Assertions.assertThat(serialization.getDocumentKey(null)).isNull();
     }
