@@ -12,7 +12,10 @@ import org.bson.BsonDocument;
 import org.bson.BsonInt32;
 import org.bson.BsonObjectId;
 import org.bson.BsonString;
+import org.bson.Document;
 import org.junit.jupiter.api.Test;
+
+import io.debezium.DebeziumException;
 
 /**
  * Verifies that the document key derived from a full document during a snapshot matches the {@code documentKey} that
@@ -22,6 +25,7 @@ import org.junit.jupiter.api.Test;
 public class ShardKeysTest {
 
     private static final BsonObjectId ID = new BsonObjectId();
+    private static final CollectionId COLLECTION = new CollectionId("dbA", "c1");
 
     @Test
     void shouldUseOnlyIdWhenCollectionIsNotSharded() {
@@ -110,7 +114,45 @@ public class ShardKeysTest {
     }
 
     @Test
+    void shouldReadShardKeyOrderFromConfigEntry() {
+        var entry = new Document("key", new Document("tenant", 1).append("region", "hashed"));
+
+        Assertions.assertThat(ShardKeys.shardKeyPathsOf(entry, COLLECTION)).containsExactly("tenant", "region");
+    }
+
+    @Test
+    void shouldTreatMissingConfigEntryAsUnsharded() {
+        Assertions.assertThat(ShardKeys.shardKeyPathsOf(null, COLLECTION)).isEmpty();
+    }
+
+    @Test
+    void shouldFailWhenConfigEntryHasNoShardKey() {
+        // Falling back to _id here would not match the documentKey that the change stream reports for the same document
+        Assertions.assertThatThrownBy(() -> ShardKeys.shardKeyPathsOf(new Document(), COLLECTION))
+                .isInstanceOf(DebeziumException.class)
+                .hasMessageContaining("no usable shard key");
+    }
+
+    @Test
+    void shouldFailWhenConfigEntryHasEmptyShardKey() {
+        var entry = new Document("key", new Document());
+
+        Assertions.assertThatThrownBy(() -> ShardKeys.shardKeyPathsOf(entry, COLLECTION))
+                .isInstanceOf(DebeziumException.class)
+                .hasMessageContaining("no usable shard key");
+    }
+
+    @Test
+    void shouldFailWhenConfigEntryShardKeyIsNotADocument() {
+        var entry = new Document("key", "tenant");
+
+        Assertions.assertThatThrownBy(() -> ShardKeys.shardKeyPathsOf(entry, COLLECTION))
+                .isInstanceOf(DebeziumException.class)
+                .hasMessageContaining("no usable shard key");
+    }
+
+    @Test
     void shouldTreatEveryCollectionAsUnshardedWithoutConnection() {
-        Assertions.assertThat(ShardKeys.unsharded().shardKeyPathsFor(new CollectionId("dbA", "c1"))).isEmpty();
+        Assertions.assertThat(ShardKeys.unsharded().shardKeyPathsFor(COLLECTION)).isEmpty();
     }
 }

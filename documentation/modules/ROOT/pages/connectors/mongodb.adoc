@@ -1859,6 +1859,9 @@ The key of a document also changes if you enable sharding on a collection that a
 
 In `document_key` mode, the connector reads the shard key of each captured collection from the `config.collections` collection so that snapshot events and streaming events for the same document share a key.
 The database user that the connector uses must be able to read `config.collections`; otherwise the connector fails.
+The connector also fails if the entry that it reads for a sharded collection carries no shard key, rather than falling back to `_id`, because such a key would not match the `documentKey` that the change stream reports for the same document.
+Do not combine `document_key` with the {link-prefix}:{link-mongodb-event-flattening}[event flattening SMT] yet.
+Where that SMT copies the record key into the `_id` field of the payload, which it does for rewritten deletes and for partial updates, it writes the whole document key rather than the `_id` that the key carries.
 ====
 
 |[[mongodb-property-capture-start-op-time]]<<mongodb-property-capture-start-op-time, `+capture.start.op.time+`>>

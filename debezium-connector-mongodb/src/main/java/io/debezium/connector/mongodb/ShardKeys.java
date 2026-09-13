@@ -43,7 +43,8 @@ public class ShardKeys {
     private static final String DROPPED_FIELD = "dropped";
 
     /**
-     * Shard key paths per collection. An empty list means "not sharded, or the shard key could not be determined".
+     * Shard key paths per collection. An empty list means "not sharded"; a collection whose shard key cannot be
+     * determined is reported rather than cached, so an entry never stands for an unknown shard key.
      */
     private final Map<CollectionId, List<String>> shardKeyPaths = new ConcurrentHashMap<>();
     private final Supplier<MongoClient> clientSupplier;
@@ -71,7 +72,8 @@ public class ShardKeys {
      * The result is cached for the lifetime of this instance, so enabling sharding on a collection while the connector
      * is running is not picked up until the task restarts.
      *
-     * @throws io.debezium.DebeziumException if {@code config.collections} cannot be read
+     * @throws io.debezium.DebeziumException if {@code config.collections} cannot be read, or if it holds an entry for
+     *             the collection that carries no usable shard key
      */
     public List<String> shardKeyPathsFor(CollectionId collectionId) {
         if (clientSupplier == null) {
@@ -100,18 +102,38 @@ public class ShardKeys {
                     + MongoDbConnectorConfig.ChangeEventKeyMode.DOCUMENT_KEY.getValue() + "'.", e);
         }
 
+        return shardKeyPathsOf(entry, collectionId);
+    }
+
+    /**
+     * Extracts the shard key field paths from a {@code config.collections} entry.
+     * <p>
+     * A missing entry means the collection is not sharded, so its document key is {@code _id} alone. An entry that
+     * carries no usable shard key is reported instead: it says the collection is sharded without saying what the
+     * shard key is, and falling back to {@code _id} there would emit a key that does not match the change stream
+     * documentKey of the same document.
+     *
+     * @param entry the {@code config.collections} entry of the collection; may be null
+     * @param collectionId the collection the entry was read for; used for reporting
+     * @return the shard key field paths in shard key order, or an empty list if the collection is not sharded
+     * @throws io.debezium.DebeziumException if the entry carries no usable shard key
+     */
+    static List<String> shardKeyPathsOf(Document entry, CollectionId collectionId) {
         if (entry == null) {
             LOGGER.debug("Collection '{}' is not sharded, its document key is '{}'", collectionId, ID_FIELD_NAME);
             return List.of();
         }
 
-        Document key = entry.get(KEY_FIELD, Document.class);
-        if (key == null || key.isEmpty()) {
-            LOGGER.warn("Shard key of collection '{}' is empty, falling back to '{}' as the document key", collectionId, ID_FIELD_NAME);
-            return List.of();
+        Object key = entry.get(KEY_FIELD);
+        if (!(key instanceof Document) || ((Document) key).isEmpty()) {
+            throw new DebeziumException("Collection '" + collectionId + "' is sharded, but its entry in '"
+                    + CONFIG_DATABASE + "." + COLLECTIONS_COLLECTION + "' carries no usable shard key ('"
+                    + KEY_FIELD + "' is " + key + "). A shard key is required by '"
+                    + MongoDbConnectorConfig.CHANGE_EVENT_KEY_MODE.name() + "="
+                    + MongoDbConnectorConfig.ChangeEventKeyMode.DOCUMENT_KEY.getValue() + "'.");
         }
 
-        List<String> paths = List.copyOf(key.keySet());
+        List<String> paths = List.copyOf(((Document) key).keySet());
         LOGGER.info("Resolved shard key {} for collection '{}'", paths, collectionId);
         return paths;
     }
