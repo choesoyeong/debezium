@@ -743,13 +743,13 @@ Because the connector derives the change event key from `_id` by default, those 
 
 To make the key unique across the cluster, set xref:mongodb-property-change-event-key-mode[`change.event.key.mode`] to `document_key`.
 The connector then uses the change stream `documentKey`, which for a sharded collection consists of the shard key followed by `_id`, and names the key field `documentKey` instead of `id`.
-For a collection that is sharded on `caseNo`, the key payload changes as follows:
+If the `customers` collection in the preceding example is sharded on `email`, the key payload changes as follows:
 
 [source,json,indent=0]
 ----
   {
     "payload": {
-      "documentKey": "{\"caseNo\": \"201907130000200001\",\"_id\": {\"$oid\": \"5d2974673484856dfa2b909a\"}}"
+      "documentKey": "{\"email\": \"annek@noanswer.org\",\"_id\": 1004}"
     }
   }
 ----
