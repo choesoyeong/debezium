@@ -1856,6 +1856,8 @@ Enabling `document_key` changes the keys of the records that the connector emits
 Because a record key determines both the topic partition that a record is written to and the identity that log compaction and sink connectors use, apply this setting only to a new connector or a new topic.
 
 The key of a document also changes if you enable sharding on a collection that already contains data, because the `documentKey` of the collection changes from `_id` to the shard key followed by `_id`.
+Restart the connector task after you enable sharding on a captured collection, or after you change its shard key.
+The connector reads the shard key of a collection once and keeps it for the lifetime of the task, so until it restarts, an incremental snapshot keys a document by the shard key that was in place earlier while streaming already keys it by the new one.
 
 In `document_key` mode, the connector reads the shard key of each captured collection from the `config.collections` collection so that snapshot events and streaming events for the same document share a key.
 The database user that the connector uses must be able to read `config.collections`; otherwise the connector fails.

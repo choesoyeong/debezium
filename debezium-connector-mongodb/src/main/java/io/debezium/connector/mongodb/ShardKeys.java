@@ -63,7 +63,7 @@ public class ShardKeys {
 
     /**
      * Get the shard key field paths of the given collection, in shard key order. The result is cached until the task
-     * restarts.
+     * restarts, so a collection sharded, or resharded, while the connector runs keeps the key it had before until then.
      *
      * @param collectionId the collection; may not be null
      * @return the shard key paths, or an empty list if the collection is not sharded; never null
