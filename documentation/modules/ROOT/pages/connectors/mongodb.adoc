@@ -109,11 +109,21 @@ You specify the replica member that the connector reads from by configuring the 
 If you do not specify a read preference, the driver default of `primary` applies, and the connector streams changes from the primary node.
 
 To reduce the load on the primary, it's possible to configure the connector to read from a secondary node, by setting `readPreference=secondaryPreferred`.
-Under normal operating conditions, configuring the connector to read from a secondary node does not significantly increase data-capture latency. 
+Under normal operating conditions, configuring the connector to read from a secondary node does not significantly increase data-capture latency.
 However, events captured from a secondary can arrive later than they would from the primary due to resource contention or network latency.
-Additional latency can also occur because change streams emit events only after changes are majority committed. 
-A change is majority committed when a majority of voting replica set members confirm that they have written the change to their journals. 
+Additional latency can also occur because change streams emit events only after changes are majority committed.
+A change is majority committed when a majority of voting replica set members confirm that they have written the change to their journals.
 As a result, a secondary node can emit an event only after it receives confirmation that the change has been majority committed.
+
+When the connection string identifies a replica set and does not set `directConnection=true`, the connector periodically verifies that the member serving the change stream still satisfies the configured read preference.
+The verification interval is controlled by xref:mongodb-property-mongodb-heartbeat-frequency-ms[`mongodb.heartbeat.frequency.ms`], so the connector does not detect role changes instantaneously.
+After a replica set election, the MongoDB driver's topology view must be updated and the next verification must run before the connector detects that the member's role changed.
+During this interval, the connector might continue to receive change stream events from that member.
+If a replica set election causes that member to stop satisfying the read preference, the connector closes the change stream and resumes it on an eligible member from the last processed offset.
+For the exact `primary` and `secondary` modes, if no eligible member is available, change stream consumption waits while the connector task remains running.
+Consumption resumes from the last processed offset when an eligible member becomes available.
+The `primaryPreferred` and `secondaryPreferred` modes continue to use the fallback behavior defined by the MongoDB driver.
+When the connector connects to a sharded cluster, `mongos` is responsible for applying the read preference to the members of each shard.
 
 // Type: assembly
 // ModuleID: how-debezium-mongodb-connectors-work
@@ -352,6 +362,11 @@ include::{partialsdir}/modules/all-connectors/con-connector-ad-hoc-snapshots.ado
 === Incremental snapshots
 
 include::{partialsdir}/modules/all-connectors/con-connector-incremental-snapshot.adoc[leveloffset=+3]
+
+Although incremental snapshot queries return documents sorted by `_id`, the connector does not preserve that order when emitting incremental snapshot records, even when xref:mongodb-property-snapshot-max-threads[`snapshot.max.threads`] is set to `1`.
+If the connector restarts during an incremental snapshot, or receives a `resume-snapshot` signal after a `pause-snapshot` signal, it re-reads the current snapshot window to avoid skipping documents that have not been emitted.
+Re-reading the window can produce duplicate `read` events for documents already emitted, consistent with at-least-once delivery.
+The potential replay volume scales with the window size, which is based on the product of xref:mongodb-property-incremental-snapshot-chunk-size[`incremental.snapshot.chunk.size`] and xref:mongodb-property-snapshot-max-threads[`snapshot.max.threads`].
 
 [WARNING]
 ====
@@ -649,7 +664,7 @@ endif::product[]
 [[mongodb-change-events-key]]
 === Change event keys
 
-A change event's key contains the schema for the changed document's key and the changed document's actual key. For a given collection, both the schema and its corresponding payload contain a single `id` field.
+A change event's key contains the schema for the changed document's key and the changed document's actual key. For a given collection, both the schema and its corresponding payload contain a single field, named `id` by default.
 The value of this field is the document's identifier represented as a string that is derived from link:https://docs.mongodb.com/manual/reference/mongodb-extended-json/[MongoDB extended JSON serialization strict mode].
 
 Consider a connector with a logical name of `fulfillment`, a replica set containing an `inventory` database, and a `customers` collection that contains documents such as the following.
@@ -730,6 +745,24 @@ This example uses a document with an integer identifier, but any valid MongoDB d
 |Binary  |`BinData("a2Fma2E=",0)`|`{ "id" : "{\"$binary\" : \"a2Fma2E=\", \"$type\" : \"00\"}" }`
 |===
 
+.Change event keys for sharded collections
+In a sharded cluster, MongoDB enforces the uniqueness of the `_id` index per shard rather than across the entire cluster.
+If a collection uses a custom `_id` instead of the default `ObjectId`, documents on different shards can therefore share an `_id` value.
+Because the connector derives the change event key from `_id` by default, those documents produce identical record keys.
+
+To make the key unique across the cluster, set xref:mongodb-property-change-event-key-mode[`change.event.key.mode`] to `document_key`.
+The connector then uses the change stream `documentKey`, which for a sharded collection consists of the shard key followed by `_id`, and names the key field `documentKey` instead of `id`.
+If the `customers` collection in the preceding example is sharded on `email`, the key payload changes as follows:
+
+[source,json,indent=0]
+----
+  {
+    "payload": {
+      "documentKey": "{\"email\": \"annek@noanswer.org\",\"_id\": 1004}"
+    }
+  }
+----
+
 // Type: concept
 // ModuleID: about-values-in-debezium-mongodb-change-events
 // Title: About values in {prodname} MongoDB change events
@@ -737,10 +770,11 @@ This example uses a document with an integer identifier, but any valid MongoDB d
 === Change event values
 
 The value in a change event is a bit more complicated than the key. Like the key, the value has a `schema` section and a `payload` section. The `schema` section contains the schema that describes the `Envelope` structure of the `payload` section, including its nested fields. Change events for operations that create, update or delete data all have a value payload with an envelope structure.
-The `after`, `before`, and `updateDescription.updatedFields` fields contain MongoDB Extended JSON strings.
+The `after`, `before`, `updateDescription.updatedFields`, and `source.resume_token` fields contain MongoDB Extended JSON strings.
 The connector's xref:mongodb-property-json-serialization-mode[`json.serialization.mode`] property controls how the connector serializes BSON values in these fields.
 By default, the connector preserves the legacy behavior: it serializes full document fields by using MongoDB Extended JSON v1 strict representation and serializes `updateDescription.updatedFields` by using MongoDB Extended JSON v2 relaxed representation.
 To use MongoDB Extended JSON v2 canonical representation, set `json.serialization.mode` to `extended`.
+For details about the event's resume token, see xref:mongodb-resume-tokens[Resume tokens in source metadata].
 
 Consider the same sample document that was used to show an example of a change event key:
 
@@ -762,6 +796,36 @@ The value portion of a change event for a change to this document is described f
 * <<mongodb-update-events,_update_ events>>
 * <<mongodb-delete-events,_delete_ events>>
 * <<mongodb-tombstone-events,Tombstone events>>
+
+[[mongodb-resume-tokens]]
+==== Resume tokens in source metadata
+
+For streaming create, update, and delete events, the optional `source.resume_token` field contains the complete resume token from the MongoDB change stream event's `_id` field.
+MongoDB replacement operations also include their event's token.
+The field has the Kafka Connect `STRING` type and the `io.debezium.data.Json` logical type.
+It contains an Extended JSON document, including `_data` and any other token fields, such as `_typeBits`, that MongoDB supplies.
+The connector does not decode or modify the contents of the token.
+
+The xref:mongodb-property-json-serialization-mode[`json.serialization.mode`] property controls the token's JSON representation.
+The `legacy` and `strict` modes use Extended JSON v1 strict representation, `extended` uses Extended JSON v2 canonical representation, and `relaxed` uses Extended JSON v2 relaxed representation.
+Binary values within the token use the binary representation of the selected Extended JSON mode.
+The token document itself is not Base64-encoded in the event payload.
+The connector continues to store its internal resume offset as Base64-encoded BSON, and change event keys are unchanged.
+
+Initial, blocking, and incremental snapshot read events have a null `source.resume_token`, because each read represents a document copied from a collection rather than a change stream event.
+The snapshot's starting resume position is not a token for an individual read event.
+Heartbeat and transaction metadata messages do not have this data event source field, and tombstone messages have a null value.
+For a xref:mongodb-property-cursor-oversize-handling-mode[supported split change stream event], the connector emits one reconstructed event with the final fragment's resume token.
+
+To resume an independent change stream after an event, parse the field's Extended JSON string into a BSON document and pass that document to MongoDB's `resumeAfter` option.
+Use the same change stream scope, pipeline, and options, including full document and pre-image settings.
+The token must still be valid in MongoDB's retained oplog history.
+Resuming after a reconstructed split event starts after its final fragment.
+
+Treat resume tokens as opaque MongoDB metadata.
+Do not use their textual representation as a permanent identifier across serialization modes or change stream configurations.
+When `updateLookup` supplies a full document, replaying an event can return newer document contents even if the event token is unchanged.
+Document field exclusion and masking settings do not modify the token's contents.
 
 [id="mongodb-create-events"]
 === _create_ events
@@ -842,7 +906,7 @@ The following example shows the value portion of a change event that the connect
             },
             {
               "type": "string",
-              "optional": false,
+              "optional": true,
               "field": "collection"
             },
             {
@@ -1577,11 +1641,11 @@ Set xref:mongodb-property-capture-mode-full-update-type[capture.mode.full.update
 
 |[[mongodb-property-json-serialization-mode]]<<mongodb-property-json-serialization-mode, `+json.serialization.mode+`>>
 |`legacy`
-a|Specifies the MongoDB Extended JSON serialization mode that the connector uses for MongoDB document fields in change event values, including `after`, `before`, and `updateDescription.updatedFields`.
+a|Specifies the MongoDB Extended JSON serialization mode that the connector uses for BSON documents in change event values, including `after`, `before`, `updateDescription.updatedFields`, and `source.resume_token`.
 Set this property to one of the following values:
 
 `legacy`:: Preserves the historical JSON behavior.
-The connector serializes full document fields, such as `after` and `before`, by using the MongoDB Extended JSON v1 strict representation, and serializes `updateDescription.updatedFields` by using the MongoDB Extended JSON v2 relaxed representation.
+The connector serializes full document fields, such as `after` and `before`, and `source.resume_token` by using the MongoDB Extended JSON v1 strict representation, and serializes `updateDescription.updatedFields` by using the MongoDB Extended JSON v2 relaxed representation.
 
 `strict`:: Uses the MongoDB Extended JSON v1 strict representation.
 
@@ -1589,7 +1653,7 @@ The connector serializes full document fields, such as `after` and `before`, by 
 
 `relaxed`:: Uses the MongoDB Extended JSON v2 relaxed representation.
 +
-Compared with the default `legacy` mode, the non-default settings can change how BSON values are represented inside the JSON strings in `after`, `before`, and `updateDescription.updatedFields`.
+Compared with the default `legacy` mode, the non-default settings can change how BSON values are represented inside the JSON strings in `after`, `before`, `updateDescription.updatedFields`, and `source.resume_token`.
 For example, DateTime, Binary, RegExp, and Int64 values can use different Extended JSON forms.
 For the complete list of BSON type representations, see the MongoDB documentation for https://www.mongodb.com/docs/manual/reference/mongodb-extended-json-v1/[Extended JSON v1] and https://www.mongodb.com/docs/manual/reference/mongodb-extended-json/[Extended JSON v2].
 
@@ -1618,14 +1682,44 @@ For the complete list of BSON type representations, see the MongoDB documentatio
 
 This setting does not affect the representation of document identifiers in change event keys.
 
+|[[mongodb-property-change-event-key-mode]]<<mongodb-property-change-event-key-mode, `+change.event.key.mode+`>>
+|`id`
+a|Specifies which part of a document the connector uses as the change event key.
+Set this property to one of the following values:
+
+`id`:: The connector uses only the `_id` field of the document.
+In a sharded cluster, MongoDB enforces the uniqueness of the `_id` index per shard rather than across the entire cluster.
+As a result, if a collection uses a custom `_id` instead of the default `ObjectId`, documents on different shards can share an `_id` value, and the connector then emits the same change event key for distinct documents.
+
+`document_key`:: The connector uses the change stream https://www.mongodb.com/docs/manual/reference/change-events/insert/#insert[`documentKey`].
+For an unsharded collection, `documentKey` contains only `_id`.
+For a sharded collection, it contains the shard key followed by `_id`, which makes the change event key unique across the cluster.
++
+[WARNING]
+====
+Enabling `document_key` changes the keys of the records that the connector emits.
+Because a record key determines both the topic partition that a record is written to and the identity that log compaction and sink connectors use, apply this setting only to a new connector or a new topic.
+
+The key of a document also changes if you enable sharding on a collection that already contains data, because the `documentKey` of the collection changes from `_id` to the shard key followed by `_id`.
+Restart the connector task after you enable sharding on a captured collection, or after you change its shard key.
+The connector reads the shard key of a collection once and keeps it for the lifetime of the task, so until it restarts, an incremental snapshot keys a document by the shard key that was in place earlier while streaming already keys it by the new one.
+
+On a sharded cluster in `document_key` mode, the connector reads the shard key of each captured collection from the `config.collections` collection so that snapshot events and streaming events for the same document share a key.
+The database user that the connector uses must then be able to read `config.collections`; otherwise the connector fails.
+====
+
 |[[mongodb-property-capture-start-op-time]]<<mongodb-property-capture-start-op-time, `+capture.start.op.time+`>>
-|No default value
+|`-1` (disabled)
 |Specifies the https://www.mongodb.com/docs/manual/changeStreams/#ref-start-time-id1[startAtOperationTime] change stream parameter.
-Set the value to be a long representation of the BSON timestamp.
+Set the value to the packed 64-bit long representation of a BSON timestamp, which contains both seconds and the operation increment.
+This value is not a Unix timestamp in seconds or milliseconds.
+The connector uses it only if no offset is available when streaming starts.
+For readable timestamp formats, use xref:mongodb-property-capture-start-timestamp[`capture.start.timestamp`].
+You cannot configure both properties unless `capture.start.op.time` is `-1` (disabled).
 
 [IMPORTANT]
 ====
-The ability to set the `capture.start.op.time`` property to override the normal offset-based behavior and begin streaming from a specific timestamp is a Technology Preview feature.
+The ability to set the `capture.start.op.time` property to begin streaming from a specific timestamp when no offset is available is a Technology Preview feature.
 Technology Preview features are not supported with Red{nbsp}Hat production service level agreements (SLAs) and might not be functionally complete.
 Red{nbsp}Hat does not recommend using them in production.
 These features provide early access to upcoming product features, enabling customers to test functionality and provide feedback during the development process.
@@ -1633,6 +1727,47 @@ These features provide early access to upcoming product features, enabling custo
 For more information about the support scope of Red{nbsp}Hat Technology Preview features, see link:https://access.redhat.com/support/offerings/techpreview/[Technology Preview Features Support Scope].
 
 ====
+
+|[[mongodb-property-capture-start-timestamp]]<<mongodb-property-capture-start-timestamp, `+capture.start.timestamp+`>>
+|No default value
+|Specifies the starting position for a change stream when no offset is available.
+An empty or whitespace-only value is treated as unset.
+This property is an alternative to xref:mongodb-property-capture-start-op-time[`capture.start.op.time`] and has the same Technology Preview status.
+Set the value to a string in one of the following formats:
+
+* Integer Unix seconds, for example, `1789084800`.
+* ISO-8601 with `Z` or an explicit UTC offset, for example, `2026-09-11T00:00:00Z` or `2026-09-11T09:00:00+09:00`.
+* A BSON timestamp in Extended JSON v2 format, for example, `{"$timestamp":{"t":1789084800,"i":7}}`.
+
+Unix seconds and ISO-8601 values use an operation increment of `0`, so capture starts at the beginning of the specified second.
+Extended JSON preserves the `i` value, which is an operation increment within a second, not a fractional second.
+Events at the specified BSON timestamp are included.
+
+Seconds and the Extended JSON `i` value must be integers in the range `0` through `4294967295`.
+For ISO-8601 values, the corresponding UTC instant must be between `1970-01-01T00:00:00Z` and `2106-02-07T06:28:15Z`, inclusive.
+Nonzero fractional seconds, timestamps without a UTC offset, and out-of-range values cause configuration errors.
+Numeric values are always interpreted as seconds; Unix milliseconds are not supported.
+An ISO-8601 fractional part containing only zeros, such as `.000`, is accepted.
+You cannot configure this property together with `capture.start.op.time` unless that property is `-1` (disabled).
+Configuration validation reports conflicting settings as errors on both properties.
+
+To start streaming from the configured timestamp without an initial snapshot, set xref:mongodb-property-snapshot-mode[`snapshot.mode`] to `no_data` and use a connector with no stored offset.
+For example:
+
+[source,json]
+----
+{
+  "snapshot.mode": "no_data",
+  "capture.start.timestamp": "2026-09-11T00:00:00Z"
+}
+----
+
+A stored resume token or offset timestamp takes precedence over this property.
+Changing the property does not rewind an existing connector.
+If the connector performs a snapshot, streaming uses the position established by the snapshot.
+This setting does not create a historical snapshot.
+MongoDB must still retain the requested starting position in the oplog; configuring a timestamp does not restore expired oplog history.
+
 |[[mongodb-property-capture-scope]]<<mongodb-property-capture-scope, `+capture.scope+`>>
 |`deployment`
 |Specifies the https://www.mongodb.com/docs/manual/changeStreams/#watch-a-collection--database--or-deployment[scope of the change streams] that the connector opens.
@@ -1688,7 +1823,7 @@ Fully-qualified names for fields are of the form _databaseName_._collectionName_
 |Specifies whether a _delete_ event is followed by a tombstone event.
 Set one of the following options:
 
-`true`:: A delete operation is represented by a _delete_ event and a subsequent tombstone event. 
+`true`:: A delete operation is represented by a _delete_ event and a subsequent tombstone event.
 
 `false`:: After a delete operation, the connector emits only a _delete_ event.
 
@@ -1696,7 +1831,7 @@ After a source record is deleted, emitting a tombstone event (the default behavi
 
 |[[mongodb-property-schema-name-adjustment-mode]]<<mongodb-property-schema-name-adjustment-mode,`+schema.name.adjustment.mode+`>>
 |none
-|Specifies how schema names should be adjusted for compatibility with the message converter used by the connector. Possible settings: 
+|Specifies how schema names should be adjusted for compatibility with the message converter used by the connector. Possible settings:
 
 * `none` does not apply any adjustment.
 * `avro` replaces the characters that cannot be used in the Avro type name with underscore.
@@ -1704,12 +1839,12 @@ After a source record is deleted, emitting a tombstone event (the default behavi
 
 |[[mongodb-property-field-name-adjustment-mode]]<<mongodb-property-field-name-adjustment-mode,`+field.name.adjustment.mode+`>>
 |none
-|Specifies how the connector adjusts field names for compatibility with the message converter used by the connector. 
-Set one of the following options: 
+|Specifies how the connector adjusts field names for compatibility with the message converter used by the connector.
+Set one of the following options:
 
 `none`:: The connector does not adjust field names.
 `avro`:: The connector replaces characters that cannot are not valid in Avro type names with underscores.
-`avro_unicode`:: The connector replaces underscores and characters that are not valid in Avro type names with the equivalent unicode, such as _uxxxx. 
+`avro_unicode`:: The connector replaces underscores and characters that are not valid in Avro type names with the equivalent unicode, such as _uxxxx.
 +
 Note: The underscore character ('`_`') represents an escape sequence similar to a backslash in Java.
 
@@ -1809,7 +1944,7 @@ For example, if you set `max.queue.size=1000`, and `max.queue.size.in.bytes=5000
 ifdef::community[]
 |[[mongodb-property-source-struct-version]]<<mongodb-property-source-struct-version, `+source.struct.version+`>>
 |v2
-|Schema version for the `source` block in CDC events. 
+|Schema version for the `source` block in CDC events.
 {prodname} 0.10 introduced a few breaking changes to the structure of the `source` block in order to unify the exposed structure across all the connectors.
 Set this option to `v1` if you want the connector to produce events that use the source block structure from earlier versions.
 Note that this setting is not recommended and is planned for removal in a future {prodname} version.
@@ -1878,7 +2013,8 @@ That is, the specified expression is matched against the entire name string of t
 
 |[[mongodb-property-snapshot-max-threads]]<<mongodb-property-snapshot-max-threads, `+snapshot.max.threads+`>>
 |`1`
-|Positive integer value that specifies the maximum number of threads used to perform an intial sync of the collections in a replica set. Defaults to 1.
+|Positive integer value that specifies the maximum number of threads used to perform an initial sync of the collections in a replica set. Defaults to 1.
+The connector also uses this number of threads to read chunks in parallel during incremental snapshots.
 
 |[[mongodb-property-snapshot-mode]]<<mongodb-property-snapshot-mode, `+snapshot.mode+`>>
 |_initial_
@@ -2024,10 +2160,27 @@ Any change events for documents exceeding the maximum (specified by the `cursor.
 
 `split`::
 Change events exceeding the maximum BSON size will be split using the https://www.mongodb.com/docs/v6.0/reference/operator/aggregation/changeStreamSplitLargeEvent/[$changeStreamSplitLargeEvent] aggregation. This option requires **MongoDB 6.0.9 or newer**.
+The connector combines all fragments into a single change event and uses the last fragment's resume token for its offset and the emitted event's `source.resume_token` field.
+When validating the saved resume token at startup, the connector applies the same full-document and pre-image options that it uses for streaming.
+The change stream used to determine the snapshot start position also uses these options.
+If its first event is split, the connector reads all fragments and records the last fragment's token before copying collection data.
 
 |[[mongodb-property-cursor-oversize-skip-threshold]]<<mongodb-property-cursor-oversize-skip-threshold, `+cursor.oversize.skip.threshold+`>>
 |0
 |The maximum allowed size **in bytes** of the stored document for which change events are processed. This includes both, the size before and after database operation, more specifically this limits the size of fullDocument and fullDocumentBeforeChange filed of MongoDB change events.
+
+|[[mongodb-property-query-fetch-size]]<<mongodb-property-query-fetch-size, `+query.fetch.size+`>>
+|`0`
+|Specifies the maximum number of change stream documents that MongoDB returns in each cursor response batch.
+A positive value sets the batch size for both the initial change stream response and subsequent `getMore` responses.
+The default value (`0`) leaves the batch size unspecified and uses the server default.
+Negative values are not permitted.
+
+MongoDB can return fewer documents than the configured value, including an empty batch, and its response size limits still apply.
+When xref:mongodb-property-cursor-oversize-handling-mode[`cursor.oversize.handling.mode`] is `split`, each fragment counts as a separate change stream document.
+
+This property applies to change streams for all capture scopes.
+It is independent of xref:mongodb-property-snapshot-fetch-size[`snapshot.fetch.size`], which controls collection reads during a snapshot, and xref:mongodb-property-max-batch-size[`max.batch.size`], which controls the connector's record processing batches.
 
 |[[mongodb-property-cursor-max-await-time-ms]]<<mongodb-property-cursor-max-await-time-ms, `+cursor.max.await.time.ms+`>>
 |`0`
@@ -2131,7 +2284,7 @@ For example, if the topic prefix is `fulfillment`, the default topic name is `fu
 |`No default`
 |Defines tags that customize MBean object names by adding metadata that provides contextual information.
 Specify a comma-separated list of key-value pairs.
-Each key represents a tag for the MBean object name, and the corresponding value represents a value for the key, for example, 
+Each key represents a tag for the MBean object name, and the corresponding value represents a value for the key, for example,
 `k1=v1,k2=v2`
 
 The connector appends the specified tags to the base MBean object name.

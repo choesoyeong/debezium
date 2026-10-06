@@ -124,6 +124,18 @@ In addition, the payload of the source message must be a `Struct` that has eithe
 
 If the structure of the events in the Kafka topic do not adhere to these rules, you must implement a custom single message transformation to convert the structure of the source events into a usable format.
 
+When an event field is a Kafka Connect `STRUCT` for which no dedicated column type is registered, the connector serializes the structure to JSON and stores it in a JSON-capable column:
+
+* **Native JSON dialects** (MySQL, PostgreSQL, SingleStore, StarRocks, CockroachDB): Written directly to native `JSON` or `jsonb` columns.
+* **Oracle**: The connector selects the column type based on the target database version. Oracle 21c and later use native `JSON` columns; earlier versions use `CLOB` columns to store JSON text.
+* **Other dialects** (Db2, SQL Server): Stored as JSON text in a large character column, such as `CLOB` or `LONGTEXT`.
+
+[NOTE]
+====
+Large character types such as `CLOB` and `LONGTEXT` are typically stored out-of-row, which can reduce write performance.
+If you can guarantee that the serialized `STRUCT` value does not exceed a fixed length, you can improve write performance by pre-creating the target column ahead of time as an in-row bounded type, such as `VARCHAR(n)`.
+====
+
 // Type: concept
 // Title: Description of how the {prodname} JDBC connector handles primary keys in source events
 // ModuleID: debezium-jdbc-connector-description-of-how-the-connector-handles-primary-keys-in-source-events
@@ -134,6 +146,7 @@ By default, the {prodname} JDBC sink connector does not transform any of the fie
 Unfortunately, the lack of a stable primary key can complicate event processing, depending on your business requirements, or when the sink connector uses upsert semantics.
 To define a consistent primary key, you can configure the connector to use one of the primary key modes described in the following table:
 
+[cols="25%a,75%a",options="header"]
 |===
 |Mode|Description
 
@@ -143,9 +156,9 @@ To define a consistent primary key, you can configure the connector to use one o
 |`kafka`
 a|The primary key consists of the following three columns:
 
-* `__connect_topic`
-* `__connect_partition`
-* `__connect_offset`
+* `+__connect_topic+`
+* `+__connect_partition+`
+* `+__connect_offset+`
 
 The values for these columns are sourced from the coordinates of the Kafka event.
 
@@ -218,6 +231,7 @@ If the specified primary key value doesn't exist, an `insert` adds a new row.
 Each database dialect handles idempotent writes differently, because there is no SQL standard for _upsert_ operations.
 The following table shows, for each database dialect that {prodname} supports, the upsert DML syntax and the constraints that trigger an update action during an upsert operation.
 
+[cols="25%a,40%a,35%a",options="header"]
 |===
 |Dialect |Upsert Syntax |Constraint that triggers the update action
 
@@ -284,7 +298,7 @@ If a uniqueness rule is required, enforce the rule in the source database, and o
 If dependent records are routed to different partitions, the sink connector might apply records out of source order, which can lead to inconsistent results.
 The following table shows how different database dialects handle conflicts involving secondary unique constraints:
 
-.Dialect-specific behavior when secondary unique constraint conflicts occur
+[cols="50%a,50%a",options="header"]
 |===
 |Dialect |Behavior
 
@@ -325,6 +339,7 @@ In each of these cases, the batch fails.
 The `schema.evolution` property controls whether the connector automatically creates or alters destination tables when event schemas change.
 The following table describes the available modes, from no evolution (`none`) through startup validation (`validate-only`) to automatic table creation and column addition (`basic`).
 
+[cols="25%a,75%a",options="header"]
 |===
 |Mode |Description
 
@@ -450,7 +465,7 @@ If xref:jdbc-property-schema-evolution[`schema.evolution`] is set to `basic`, th
 Automatic table creation does not expose SingleStore-specific shard key, sort key, or other table option settings.
 If the target table requires explicit shard keys, sort keys, or other SingleStore table options, create the destination table in SingleStore before the connector writes to it.
 
-For SingleStore targets, {prodname} maps {prodname} `io.debezium.data.Json` logical values and Kafka Connect `ARRAY` and `MAP` schema values to the SingleStore `JSON` column type.
+For SingleStore targets, {prodname} maps {prodname} `io.debezium.data.Json` logical values and Kafka Connect `ARRAY`, `MAP`, and `STRUCT` schema values to the SingleStore `JSON` column type.
 The connector maps {prodname} `io.debezium.data.geometry.Geometry` and `io.debezium.data.geometry.Geography` logical values to the SingleStore `GEOGRAPHY` column type, and `io.debezium.data.geometry.Point` logical values to the SingleStore `GEOGRAPHYPOINT` column type.
 SingleStore supports a subset of WKT geospatial values.
 The connector writes `POINT`, `LINESTRING`, and `POLYGON` WKB values to SingleStore as WKT strings.
@@ -493,8 +508,11 @@ StarRocks `VARCHAR` lengths are byte lengths rather than character lengths, so t
 `DECIMAL` columns support a maximum precision of 38; the connector caps larger propagated precisions at 38, and values that exceed the capped precision fail on write.
 When column type propagation is enabled, `BIGINT UNSIGNED` source columns map to `LARGEINT` columns, preserving the full unsigned 64-bit range.
 
-{prodname} `io.debezium.data.Json` logical values and Kafka Connect `MAP` schema values map to the StarRocks `JSON` column type, `ENUM` and `SET` values map to `STRING` columns, and `YEAR` values map to `INT` columns.
-The StarRocks dialect does not support geospatial or vector logical types, and Kafka Connect `ARRAY` and `STRUCT` schema types are not mapped to the StarRocks `ARRAY` and `STRUCT` column types.
+{prodname} `io.debezium.data.Json` logical values and Kafka Connect `MAP` and `STRUCT` schema values map to the StarRocks `JSON` column type, `ENUM` and `SET` values map to `STRING` columns, and `YEAR` values map to `INT` columns.
+The StarRocks dialect does not map geospatial or vector logical types to native StarRocks column types.
+Because geospatial values are struct-based, they are serialized to `JSON` like other `STRUCT` values rather than being rejected.
+
+The Kafka Connect `ARRAY` schema type is not mapped to the StarRocks `ARRAY` column type, and `STRUCT` values are stored as `JSON` rather than as the native StarRocks `STRUCT` column type.
 
 [[jdbc-cockroachdb-targets]]
 === CockroachDB sink targets
@@ -512,7 +530,7 @@ Setting `flush.max.retries` to `0` disables the retries so that a conflicting fl
 
 For CockroachDB targets, {prodname} uses PostgreSQL-compatible mappings for most data types, with the following exceptions:
 
-* `io.debezium.data.Json` logical values and Kafka Connect `MAP` schema values are written to the CockroachDB `jsonb` column type.
+* `io.debezium.data.Json` logical values and Kafka Connect `MAP` and `STRUCT` schema values are written to the CockroachDB `jsonb` column type.
 * `io.debezium.data.Xml` logical values and propagated range, `macaddr`, and `cidr` column types are written as `text`, because CockroachDB does not provide those types.
 * Propagated `money` column types are written as `decimal(19,2)` types.
 * `io.debezium.data.geometry.Geometry`, `io.debezium.data.geometry.Geography`, and `io.debezium.data.geometry.Point` logical values are written to the built-in CockroachDB `geometry` and `geography` types; no PostGIS extension schema is required.
@@ -655,7 +673,7 @@ The actual final column type varies with for each database type.
 
 The following table maps each Kafka Connect primitive type to its corresponding JDBC SQL type, which the {prodname} JDBC sink connector uses when creating or altering columns in the destination database.
 
-.Mappings between Kafka Connect primitive data types and column data types
+[cols="50%a,50%a",options="header"]
 |===
 |Primitive Type |JDBC SQL Type
 
@@ -704,7 +722,7 @@ As a workaround, if you need a BOOLEAN data type for an Oracle 23 sink, add the 
 
 The following table maps each Kafka Connect logical type to its corresponding JDBC SQL type, which the {prodname} JDBC sink connector uses when writing structured data such as dates, times, and decimals to the destination database.
 
-.Mappings between Kafka Connect logical data types and column data types
+[cols="50%a,50%a",options="header"]
 |===
 |Logical Type |JDBC SQL Type
 
@@ -729,7 +747,7 @@ The following table maps each Kafka Connect logical type to its corresponding JD
 
 The following table maps {prodname} logical types to their corresponding JDBC SQL types, which the connector uses when writing {prodname} change event fields — such as timestamps, durations, and variable-scale decimals — to the destination database.
 
-.Mappings between {prodname} logical types and column data types
+[cols="50%a,50%a",options="header"]
 |===
 |Logical Type |JDBC SQL Type
 
@@ -942,13 +960,13 @@ ifdef::community[]
 For SingleStore targets, {prodname} uses MySQL/MariaDB-compatible mappings for most dialect-specific logical types.
 SingleStore maps {prodname} `io.debezium.data.Json` logical values to `json`.
 
-Kafka Connect `MAP` schema values are also written to SingleStore `json` columns.
+Kafka Connect `MAP` and `STRUCT` schema values are also written to SingleStore `json` columns.
 {prodname} `io.debezium.data.geometry.Geometry` and `io.debezium.data.geometry.Geography` logical values are written to SingleStore `geography` columns, and `io.debezium.data.geometry.Point` logical values are written to SingleStore `geographypoint` columns.
 
 When you configure the JDBC connector to use CockroachDB as a sink target, {prodname} uses the PostgreSQL-compatible mappings for most dialect-specific logical types.
 For example, the connector uses the following mappings:
 
-* `io.debezium.data.Json` logical values and Kafka Connect `MAP` schema values are written to CockroachDB `jsonb` columns.
+* `io.debezium.data.Json` logical values and Kafka Connect `MAP` and `STRUCT` schema values are written to CockroachDB `jsonb` columns.
 * `io.debezium.data.Xml` logical values are written to `text` columns because CockroachDB has no XML type.
 * Geometry, geography, and point values are written to the built-in CockroachDB `geometry` and `geography` types without a PostGIS extension schema.
 * `io.debezium.data.FloatVector` logical values are written to `vector` columns; sparse double vectors are not supported.
@@ -993,7 +1011,9 @@ ifdef::community[]
 For SingleStore, `FloatVector` maps to `vector(n, F32)` and `DoubleVector` maps to `vector(n, F64)`.
 If the source column length is unavailable, the connector uses default dimensions of `2048` for `FloatVector` and `16383` for `DoubleVector`.
 
-.Mappings between {prodname} Vector Types and Column Data Types
+The following table maps {prodname} logical vector types to their corresponding column data types for each supported sink database.
+
+[cols="30%a,12%a,12%a,12%a,12%a,12%a,10%a",options="header"]
 |===
 |Logical Type |Db2 |MySQL |PostgreSQL |Oracle |SQL Server |SingleStore
 
@@ -1026,7 +1046,9 @@ If the source column length is unavailable, the connector uses default dimension
 endif::community[]
 
 ifdef::product[]
-.Mappings between {prodname} Vector Types and Column Data Types
+The following table maps {prodname} logical vector types to their corresponding column data types for each supported sink database.
+
+[cols="30%a,14%a,14%a,14%a,14%a,14%a",options="header"]
 |===
 |Logical Type |Db2 |MySQL |PostgreSQL |Oracle |SQL Server
 
@@ -1151,7 +1173,7 @@ CollectionNameTransformation::
 The `CollectionNameTransformation` provides a way to change the case of the topic names before the event is consumed.
 This transformation has the following configuration properties:
 +
-[cols="30%a,25%a,45%a"]
+[cols="30%a,25%a,45%a",options="header"]
 |===
 |Property |Default |Description
 
@@ -1192,7 +1214,7 @@ When the event is not a {prodname} source connector event, all top-level field n
 +
 This transformation has the following configuration properties:
 +
-[cols="30%a,25%a,45%a"]
+[cols="30%a,25%a,45%a",options="header"]
 |===
 |Property |Default |Description
 
@@ -1400,8 +1422,6 @@ The drivers that are required for {prodname} to connect to these databases are n
 The example provides the Maven URL for the Oracle Database JDBC driver.
 The Db2 JDBC driver is available at the following Maven location: `https://repo1.maven.org/maven2/com/ibm/db2/jcc/{db2-version}/jcc-{db2-version}.jar`
 
-|===
-
 3. Apply the `KafkaConnect` build specification to the OpenShift cluster by entering the following command:
 +
 [source,shell,options="nowrap"]
@@ -1602,7 +1622,7 @@ For non-delete records, the connector increments the insert, update, or upsert m
 
 The connector registers the following MBean while the task is running:
 
-`debezium.jdbc:type=connector-metrics,context=sink,server=__<connector_name>__,task=__<task_id>__`
+`debezium.jdbc:type=connector-metrics,context=sink,server=+__<connector_name>__+,task=+__<task_id>__+`
 
 The following table describes the available metrics.
 
@@ -1675,7 +1695,7 @@ Information about the properties is organized as follows:
 
 The following table describes the Kafka consumer properties that control how the {prodname} JDBC sink connector identifies itself to Kafka Connect and specifies the topics it consumes.
 
-[cols="30%a,25%a,45%a"]
+[cols="30%a,25%a,45%a",options="header"]
 |===
 |Property |Default |Description
 
@@ -1722,7 +1742,7 @@ Do not use this property in combination with the xref:jdbc-property-connection-t
 
 The following table describes the properties that control how the {prodname} JDBC sink connector connects to and authenticates with the destination database, including connection pool settings.
 
-[cols="30%a,25%a,45%a"]
+[cols="30%a,25%a,45%a",options="header"]
 |===
 |Property |Default |Description
 
@@ -1776,7 +1796,7 @@ Use with caution where strong data consistency is required.
 
 The following table describes the runtime properties that control how the {prodname} JDBC sink connector processes events and writes data to the destination database, including insert mode, primary key resolution, schema evolution, and batching behavior.
 
-[cols="30%a,25%a,45%a"]
+[cols="30%a,25%a,45%a",options="header"]
 |===
 |Property |Default |Description
 
@@ -1827,9 +1847,9 @@ When idempotent writes are required, the connector should be configured to use t
 `kafka`:: Specifies that the connector uses Kafka coordinates as the primary key columns.
 The key coordinates are defined from the topic name, partition, and offset of the event, and are mapped to columns with the following names:
 
-* `__connect_topic`
-* `__connect_partition`
-* `__connect_offset`
+* `+__connect_topic+`
+* `+__connect_partition+`
+* `+__connect_offset+`
 
 `record_key`:: Specifies that the primary key columns are sourced from the event's record key.
 If the record key is a primitive type, the xref:jdbc-property-primary-key-fields[`primary.key.fields`] property is required to specify the name of the primary key column.
@@ -1884,12 +1904,27 @@ The default is `public`; however, if the PostGIS extension was installed in anot
 
 |[[jdbc-property-dialect-postgres-unnest-insert-enabled]]<<jdbc-property-dialect-postgres-unnest-insert-enabled, `+dialect.postgres.unnest.insert.enabled+`>>
 |`false`
-|Specifies whether to enable `UNNEST`-based batch inserts for PostgreSQL.
+|Specifies whether to enable `UNNEST`-based batch inserts for PostgreSQL and CockroachDB.
 
-When enabled, uses PostgreSQL `UNNEST()` for batch inserts, which can significantly improve performance by reducing the number of SQL statements executed.
+Set the value to `true` to enable the connector to use `UNNEST()` for batch inserts.
+After you enable batching, instead of submitting multiple SQL statements to the target database, the connector accumulates multiple change events up to the `batch.size` limit, and then submits the events to the target database in a single SQL statement.
+Reducing the number of SQL statements in this way can improve performance for certain workloads.
 This optimization is compatible with `INSERT` and `UPSERT` modes.
 
-For information about the performance benefits of enabling the UNNEST function, see link:https://www.tigerdata.com/blog/boosting-postgres-insert-performance["Boosting Postgres Insert Performance"^] in the Tiger Data blog.
+For topics that receive a high volume of updates for the same primary key, you can further improve the effectiveness of batching by setting <<jdbc-property-use-reduction-buffer, `+use.reduction.buffer+`>> to `true`.
+This setting enables the connector to combine multiple events for a primary key into a single final operation before it writes to the database.
+
+If a batch includes multiple events for the same primary key while `use.reduction.buffer` is set to `false`, the attempt to combine statements fails, and the database returns the following error:
+
+`ON CONFLICT command cannot affect row a second time.`
+
+The task then stops.
+
+For more information about how the connector's use of the UNNEST function improves write performance for PostgreSQL and CockroachDB databases, see the following resources:
+
+* link:https://www.tigerdata.com/blog/boosting-postgres-insert-performance["Boosting Postgres Insert Performance"^] in the Tiger Data blog.
+
+* link:https://www.cockroachlabs.com/docs/stable/performance-best-practices-overview#use-multi-row-statements-instead-of-multiple-single-row-statements["Use multi-row statements instead of multiple single-row statements"^] in the CockroachDB documentation.
 
 |[[jdbc-property-dialect-sqlserver-identity-insert]]<<jdbc-property-dialect-sqlserver-identity-insert, `+dialect.sqlserver.identity.insert+`>>
 |`false`
@@ -1976,7 +2011,7 @@ Clamping alters the stored value; enable this option only when a lossy represent
 
 The following table describes the properties that allow you to customize the naming strategies the {prodname} JDBC sink connector uses to resolve destination table names and column names from incoming event data.
 
-[cols="30%a,25%a,45%a"]
+[cols="30%a,25%a,45%a",options="header"]
 |===
 |Property |Default |Description
 

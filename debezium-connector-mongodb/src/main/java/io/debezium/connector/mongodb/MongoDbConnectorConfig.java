@@ -19,6 +19,7 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
 import org.apache.kafka.common.config.ConfigDef.Type;
 import org.apache.kafka.common.config.ConfigDef.Width;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.data.Struct;
 import org.bson.BsonTimestamp;
 import org.bson.Document;
@@ -672,6 +673,68 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
         }
     }
 
+    /**
+     * The set of predefined modes for deriving the change event key from a document.
+     */
+    public enum ChangeEventKeyMode implements EnumeratedValue {
+        /**
+         * Uses only the {@code _id} field of the document. In a sharded cluster {@code _id} is only guaranteed to be
+         * unique within a shard, so distinct documents may produce the same change event key.
+         */
+        ID("id"),
+
+        /**
+         * Uses the change stream {@code documentKey}, which is the shard key followed by {@code _id} for sharded
+         * collections and just {@code _id} otherwise. This makes the key unique across the whole cluster.
+         */
+        DOCUMENT_KEY("document_key");
+
+        private final String value;
+
+        ChangeEventKeyMode(String value) {
+            this.value = value;
+        }
+
+        @Override
+        public String getValue() {
+            return value;
+        }
+
+        /**
+         * Determine if the supplied value is one of the predefined options.
+         *
+         * @param value the configuration property value; may not be null
+         * @return the matching option, or null if no match is found
+         */
+        public static ChangeEventKeyMode parse(String value) {
+            if (value == null) {
+                return null;
+            }
+            value = value.trim();
+            for (ChangeEventKeyMode option : ChangeEventKeyMode.values()) {
+                if (option.getValue().equalsIgnoreCase(value)) {
+                    return option;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * Determine if the supplied value is one of the predefined options.
+         *
+         * @param value the configuration property value; may not be null
+         * @param defaultValue the default value; may be null
+         * @return the matching option, or null if no match is found and the non-null default is invalid
+         */
+        public static ChangeEventKeyMode parse(String value, String defaultValue) {
+            ChangeEventKeyMode mode = parse(value);
+            if (mode == null && defaultValue != null) {
+                mode = parse(defaultValue);
+            }
+            return mode;
+        }
+    }
+
     protected static final int DEFAULT_SNAPSHOT_FETCH_SIZE = 0;
 
     public static final Field ALLOW_OFFSET_INVALIDATION = Field.createInternal("mongodb.allow.offset.invalidation")
@@ -967,6 +1030,20 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
                     + "'extended' uses MongoDB Extended JSON v2 canonical mode. "
                     + "'relaxed' uses MongoDB Extended JSON v2 relaxed mode.");
 
+    public static final Field CHANGE_EVENT_KEY_MODE = Field.create("change.event.key.mode")
+            .withDisplayName("Change event key mode")
+            .withEnum(ChangeEventKeyMode.class, ChangeEventKeyMode.ID)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR))
+            .withWidth(Width.SHORT)
+            .withImportance(Importance.MEDIUM)
+            .withDescription("Controls which part of the document is used as the change event key. "
+                    + "Options include: "
+                    + "'id' (the default) uses only the '_id' field; "
+                    + "'document_key' uses the change stream 'documentKey', which for a sharded collection is the shard key "
+                    + "followed by '_id' and is therefore unique across the whole cluster. "
+                    + "Note that enabling 'document_key' changes the emitted record keys, and that the key of a document "
+                    + "changes if sharding is enabled on a collection that already contains data.");
+
     public static final Field CAPTURE_START_OP_TIME = Field.create("capture.start.op.time")
             .withDisplayName("Capture from operation time")
             .withType(Type.LONG)
@@ -974,8 +1051,21 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
             .withWidth(Width.SHORT)
             .withImportance(Importance.LOW)
             .withDefault(-1L)
-            .withDescription("If no existing offset is detected,  "
-                    + "Debezium will start streaming from given timestamp");
+            .withValidation(MongoDbConnectorConfig::validateStartOpTime)
+            .withDescription("If no existing offset is detected, Debezium will start streaming from the given packed BSON timestamp. "
+                    + "Cannot be used with capture.start.timestamp unless set to -1 (disabled).");
+
+    public static final Field CAPTURE_START_TIMESTAMP = Field.create("capture.start.timestamp")
+            .withDisplayName("Capture from timestamp")
+            .withType(Type.STRING)
+            .withGroup(Field.createGroupEntry(Field.Group.CONNECTOR_ADVANCED))
+            .withWidth(Width.LONG)
+            .withImportance(Importance.LOW)
+            .withValidation(MongoDbConnectorConfig::validateStartTimestamp)
+            .withDescription("If no existing offset is detected, Debezium will start streaming from this timestamp. "
+                    + "Accepts integer Unix seconds, ISO-8601 with a UTC offset and whole-second precision, "
+                    + "or a BSON timestamp in Extended JSON format. "
+                    + "Cannot be used with capture.start.op.time unless that property is set to -1 (disabled).");
 
     public static final Field CAPTURE_SCOPE = Field.create("capture.scope")
             .withDisplayName("Capture scope")
@@ -1094,15 +1184,22 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
     public static final Field SOURCE_INFO_STRUCT_MAKER = CommonConnectorConfig.SOURCE_INFO_STRUCT_MAKER
             .withDefault(MongoDbSourceInfoStructMaker.class.getName());
 
+    public static final Field QUERY_FETCH_SIZE = CommonConnectorConfig.QUERY_FETCH_SIZE
+            .withDisplayName("Change stream cursor batch size")
+            .withDescription("The maximum number of change stream documents returned in each batch from MongoDB. "
+                    + "A value of '0' uses the server default batch size.");
+
     private static final ConfigDefinition CONFIG_DEFINITION = CommonConnectorConfig.CONFIG_DEFINITION.edit()
             .name("MongoDB")
+            .excluding(CommonConnectorConfig.QUERY_FETCH_SIZE)
             .group(Field.Group.CONNECTION, CONNECTION_STRING, ALLOW_OFFSET_INVALIDATION, USER, PASSWORD, AUTH_SOURCE, CONNECT_TIMEOUT_MS,
                     HEARTBEAT_FREQUENCY_MS, SOCKET_TIMEOUT_MS, SERVER_SELECTION_TIMEOUT_MS, MONGODB_POLL_INTERVAL_MS, SSL_ENABLED, SSL_ALLOW_INVALID_HOSTNAMES,
                     CURSOR_MAX_AWAIT_TIME_MS)
             .group(Field.Group.FILTERS, DATABASE_INCLUDE_LIST, DATABASE_EXCLUDE_LIST, COLLECTION_INCLUDE_LIST, COLLECTION_EXCLUDE_LIST, FIELD_EXCLUDE_LIST, FIELD_RENAMES,
                     SNAPSHOT_FILTER_QUERY_BY_COLLECTION)
-            .group(Field.Group.CONNECTOR, TOPIC_PREFIX, SNAPSHOT_MODE, CAPTURE_MODE, CAPTURE_SCOPE, CAPTURE_TARGET, JSON_SERIALIZATION_MODE, SCHEMA_NAME_ADJUSTMENT_MODE,
-                    SOURCE_INFO_STRUCT_MAKER)
+            .group(Field.Group.CONNECTOR, TOPIC_PREFIX, SNAPSHOT_MODE, CAPTURE_MODE, CAPTURE_SCOPE, CAPTURE_TARGET, JSON_SERIALIZATION_MODE,
+                    CHANGE_EVENT_KEY_MODE, SCHEMA_NAME_ADJUSTMENT_MODE, SOURCE_INFO_STRUCT_MAKER, CAPTURE_START_OP_TIME, CAPTURE_START_TIMESTAMP)
+            .group(Field.Group.CONNECTOR_ADVANCED, QUERY_FETCH_SIZE)
             .create();
 
     /**
@@ -1115,7 +1212,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
     }
 
     private final SnapshotMode snapshotMode;
-    private final Long startOperationTime;
+    private final BsonTimestamp startOperationTime;
     private final CaptureMode captureMode;
     private final JsonSerializationMode jsonSerializationMode;
     private final FullUpdateType captureModeFullUpdateType;
@@ -1145,6 +1242,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
     private final OversizeHandlingMode oversizeHandlingMode;
     private final FiltersMatchMode filtersMatchMode;
     private final int oversizeSkipThreshold;
+    private final ChangeEventKeyMode changeEventKeyMode;
 
     public MongoDbConnectorConfig(Configuration config) {
         super(config, DEFAULT_SNAPSHOT_FETCH_SIZE);
@@ -1173,7 +1271,12 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
         String snapshotModeValue = config.getString(MongoDbConnectorConfig.SNAPSHOT_MODE);
         this.snapshotMode = SnapshotMode.parse(snapshotModeValue, MongoDbConnectorConfig.SNAPSHOT_MODE.defaultValueAsString());
 
-        this.startOperationTime = config.getLong(CAPTURE_START_OP_TIME);
+        try {
+            this.startOperationTime = resolveStartOperationTime(config);
+        }
+        catch (IllegalArgumentException e) {
+            throw new ConfigException(CAPTURE_START_TIMESTAMP.name(), config.getString(CAPTURE_START_TIMESTAMP), e.getMessage());
+        }
 
         String captureModeValue = config.getString(MongoDbConnectorConfig.CAPTURE_MODE);
         this.captureMode = CaptureMode.parse(captureModeValue, MongoDbConnectorConfig.CAPTURE_MODE.defaultValueAsString());
@@ -1201,6 +1304,9 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
 
         this.snapshotMaxThreads = resolveSnapshotMaxThreads(config);
         this.cursorMaxAwaitTimeMs = config.getInteger(MongoDbConnectorConfig.CURSOR_MAX_AWAIT_TIME_MS, 0);
+
+        String changeEventKeyModeValue = config.getString(MongoDbConnectorConfig.CHANGE_EVENT_KEY_MODE);
+        this.changeEventKeyMode = ChangeEventKeyMode.parse(changeEventKeyModeValue, MongoDbConnectorConfig.CHANGE_EVENT_KEY_MODE.defaultValueAsString());
     }
 
     private static int validateChangeStreamPipeline(Configuration config, Field field, ValidationOutput problems) {
@@ -1284,6 +1390,42 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
         return ConnectorConfigValidationHelper.validateExcludeField(config, DATABASE_INCLUDE_LIST, DATABASE_EXCLUDE_LIST, problems);
     }
 
+    private static int validateStartOpTime(Configuration config, Field field, ValidationOutput problems) {
+        if (hasConflictingStartTimes(config)) {
+            problems.accept(field, config.getString(field), "Cannot be configured together with '" + CAPTURE_START_TIMESTAMP.name() + "'");
+            return 1;
+        }
+        return 0;
+    }
+
+    private static int validateStartTimestamp(Configuration config, Field field, ValidationOutput problems) {
+        try {
+            resolveStartOperationTime(config);
+            return 0;
+        }
+        catch (IllegalArgumentException e) {
+            problems.accept(field, config.getString(field), e.getMessage());
+            return 1;
+        }
+    }
+
+    private static boolean hasConflictingStartTimes(Configuration config) {
+        return !Strings.isNullOrBlank(config.getString(CAPTURE_START_TIMESTAMP))
+                && !CAPTURE_START_OP_TIME.defaultValue().equals(config.getLong(CAPTURE_START_OP_TIME));
+    }
+
+    private static BsonTimestamp resolveStartOperationTime(Configuration config) {
+        if (hasConflictingStartTimes(config)) {
+            throw new IllegalArgumentException("Cannot be configured together with '" + CAPTURE_START_OP_TIME.name() + "'");
+        }
+        final var value = config.getString(CAPTURE_START_TIMESTAMP);
+        if (!Strings.isNullOrBlank(value)) {
+            return BsonTimestampParser.parse(value);
+        }
+        final var operationTime = config.getLong(CAPTURE_START_OP_TIME);
+        return !CAPTURE_START_OP_TIME.defaultValue().equals(operationTime) ? new BsonTimestamp(operationTime) : null;
+    }
+
     private static int validateCaptureTarget(Configuration config, Field field, ValidationOutput problems) {
         var value = config.getString(field);
         var scope = CaptureScope.parse(config.getString(CAPTURE_SCOPE), CAPTURE_SCOPE.defaultValueAsString());
@@ -1340,10 +1482,7 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
     }
 
     public Optional<BsonTimestamp> startAtOperationTime() {
-        if (CAPTURE_START_OP_TIME.defaultValue().equals(startOperationTime)) {
-            return Optional.empty();
-        }
-        return Optional.of(new BsonTimestamp(startOperationTime));
+        return Optional.ofNullable(startOperationTime);
     }
 
     public FullUpdateType getCaptureModeFullUpdateType() {
@@ -1462,6 +1601,10 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
         return filtersMatchMode;
     }
 
+    public ChangeEventKeyMode getChangeEventKeyMode() {
+        return changeEventKeyMode;
+    }
+
     @Override
     public int getSnapshotMaxThreads() {
         return snapshotMaxThreads;
@@ -1527,8 +1670,8 @@ public class MongoDbConnectorConfig extends CommonConnectorConfig implements Sha
         final String[] result = new String[3];
         int idx = 0;
         for (Object fieldValue : fields.values()) {
-            if (fieldValue instanceof Document) {
-                result[idx++] = ((Document) fieldValue).toJson();
+            if (fieldValue instanceof Document document) {
+                result[idx++] = document.toJson();
             }
             else {
                 result[idx++] = fieldValue.toString();

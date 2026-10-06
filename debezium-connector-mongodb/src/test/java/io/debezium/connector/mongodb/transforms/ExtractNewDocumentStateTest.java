@@ -11,6 +11,7 @@ import static io.debezium.junit.SkipWhenKafkaVersion.KafkaVersion.KAFKA_241;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
+import java.util.Arrays;
 import java.util.HashMap;
 
 import org.apache.kafka.connect.data.Schema;
@@ -22,6 +23,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import io.debezium.connector.AbstractSourceInfo;
+import io.debezium.connector.mongodb.MongoDbSchema;
 import io.debezium.doc.FixFor;
 import io.debezium.junit.SkipWhenKafkaVersion;
 import io.debezium.util.Collect;
@@ -237,6 +239,157 @@ public class ExtractNewDocumentStateTest {
         assertThrows(IllegalArgumentException.class, () -> transformation.apply(eventRecord));
     }
 
+    @Test
+    @FixFor("debezium/dbz#2568")
+    public void shouldEmitNullForFieldsRemovedByUnsetWithFullDocument() {
+        Schema keySchema = SchemaBuilder.struct()
+                .name("mongo.lab.evolving.Key")
+                .field("id", Schema.STRING_SCHEMA)
+                .build();
+        Struct keyStruct = new Struct(keySchema).put("id", "\"evolution-1\"");
+
+        Schema updateDescriptionSchema = SchemaBuilder.struct()
+                .name("mongo.lab.evolving.updateDescription")
+                .field("updatedFields", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("removedFields", SchemaBuilder.array(Schema.STRING_SCHEMA).optional().build())
+                .field("truncatedArrays", SchemaBuilder.array(Schema.STRING_SCHEMA).optional().build())
+                .optional()
+                .build();
+
+        Schema valueSchema = SchemaBuilder.struct()
+                .name("mongo.lab.evolving.Envelope")
+                .field("after", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("updateDescription", updateDescriptionSchema)
+                .field("op", Schema.STRING_SCHEMA)
+                .build();
+        Struct valueStruct = new Struct(valueSchema)
+                .put("after", "{\"_id\": \"evolution-1\", \"revision\": 2, \"profile\": {\"name\": \"Alice\"}}")
+                .put("updateDescription", new Struct(updateDescriptionSchema)
+                        .put("updatedFields", "{\"revision\": 2}")
+                        .put("removedFields", Arrays.asList("removable_value", "profile.age")))
+                .put("op", "u");
+
+        final SourceRecord eventRecord = new SourceRecord(
+                new HashMap<>(),
+                new HashMap<>(),
+                "mongo.lab.evolving",
+                keySchema,
+                keyStruct,
+                valueSchema,
+                valueStruct);
+
+        SourceRecord transformed = transformation.apply(eventRecord);
+        Struct value = (Struct) transformed.value();
+
+        assertThat(value.get("revision")).isEqualTo(2);
+        assertThat(transformed.valueSchema().field("removable_value")).isNotNull();
+        assertThat(value.get("removable_value")).isNull();
+
+        Struct profile = value.getStruct("profile");
+        assertThat(profile.get("name")).isEqualTo("Alice");
+        assertThat(profile.schema().field("age")).isNotNull();
+        assertThat(profile.get("age")).isNull();
+    }
+
+    @Test
+    @FixFor("debezium/dbz#2568")
+    public void shouldEmitNullForFieldsRemovedByUnsetWithPartialUpdate() {
+        Schema keySchema = SchemaBuilder.struct()
+                .name("mongo.lab.evolving.Key")
+                .field("id", Schema.STRING_SCHEMA)
+                .build();
+        Struct keyStruct = new Struct(keySchema).put("id", "\"evolution-1\"");
+
+        Schema updateDescriptionSchema = SchemaBuilder.struct()
+                .name("mongo.lab.evolving.updateDescription")
+                .field("updatedFields", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("removedFields", SchemaBuilder.array(Schema.STRING_SCHEMA).optional().build())
+                .field("truncatedArrays", SchemaBuilder.array(Schema.STRING_SCHEMA).optional().build())
+                .optional()
+                .build();
+
+        Schema valueSchema = SchemaBuilder.struct()
+                .name("mongo.lab.evolving.Envelope")
+                .field("after", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("updateDescription", updateDescriptionSchema)
+                .field("op", Schema.STRING_SCHEMA)
+                .build();
+        Struct valueStruct = new Struct(valueSchema)
+                .put("updateDescription", new Struct(updateDescriptionSchema)
+                        .put("updatedFields", "{\"revision\": 2}")
+                        .put("removedFields", Arrays.asList("removable_value")))
+                .put("op", "u");
+
+        final SourceRecord eventRecord = new SourceRecord(
+                new HashMap<>(),
+                new HashMap<>(),
+                "mongo.lab.evolving",
+                keySchema,
+                keyStruct,
+                valueSchema,
+                valueStruct);
+
+        SourceRecord transformed = transformation.apply(eventRecord);
+        Struct value = (Struct) transformed.value();
+
+        assertThat(value.get("revision")).isEqualTo(2);
+        assertThat(transformed.valueSchema().field("removable_value")).isNotNull();
+        assertThat(value.get("removable_value")).isNull();
+    }
+
+    @Test
+    @FixFor("debezium/dbz#2570")
+    public void shouldEmitBsonTimestampStructWhenConfigured() {
+        ExtractNewDocumentState<SourceRecord> structTransformation = new ExtractNewDocumentState<>();
+        structTransformation.configure(Collect.hashMapOf(
+                "array.encoding", "array",
+                "bson.timestamp.handling.mode", "struct"));
+        try {
+            Schema keySchema = SchemaBuilder.struct()
+                    .name("mongo.lab.timestamps.Key")
+                    .field("id", Schema.STRING_SCHEMA)
+                    .build();
+            Struct keyStruct = new Struct(keySchema).put("id", "\"timestamp-1\"");
+
+            Schema updateDescriptionSchema = SchemaBuilder.struct()
+                    .name("mongo.lab.timestamps.updateDescription")
+                    .field("updatedFields", Schema.OPTIONAL_STRING_SCHEMA)
+                    .field("removedFields", SchemaBuilder.array(Schema.STRING_SCHEMA).optional().build())
+                    .optional()
+                    .build();
+
+            Schema valueSchema = SchemaBuilder.struct()
+                    .name("mongo.lab.timestamps.Envelope")
+                    .field("after", Schema.OPTIONAL_STRING_SCHEMA)
+                    .field("updateDescription", updateDescriptionSchema)
+                    .field("op", Schema.STRING_SCHEMA)
+                    .build();
+            Struct valueStruct = new Struct(valueSchema)
+                    .put("after", "{\"_id\": \"timestamp-1\", \"ts\": {\"$timestamp\": {\"t\": 1710000000, \"i\": 7}}}")
+                    .put("op", "c");
+
+            final SourceRecord eventRecord = new SourceRecord(
+                    new HashMap<>(),
+                    new HashMap<>(),
+                    "mongo.lab.timestamps",
+                    keySchema,
+                    keyStruct,
+                    valueSchema,
+                    valueStruct);
+
+            SourceRecord transformed = structTransformation.apply(eventRecord);
+            Struct value = (Struct) transformed.value();
+
+            Struct timestamp = value.getStruct("ts");
+            assertThat(timestamp.schema().name()).isEqualTo(MongoDbSchema.SCHEMA_NAME_TIMESTAMP);
+            assertThat(timestamp.get("time")).isEqualTo(1710000000L);
+            assertThat(timestamp.get("increment")).isEqualTo(7L);
+        }
+        finally {
+            structTransformation.close();
+        }
+    }
+
     /**
      * Verifies that when {@code field.name.adjustment.mode} is set to {@code avro},
      * schema names containing dot-separated segments that start with a digit
@@ -289,5 +442,83 @@ public class ExtractNewDocumentStateTest {
         SourceRecord transformed = avroTransformation.apply(eventRecord);
 
         assertThat(transformed.valueSchema().name()).isEqualTo("mongo.DASMongoDB._10019_AutoState");
+    }
+
+    @Test
+    @FixFor("debezium/dbz#2337")
+    public void shouldKeepTheKeyFieldNameOfTheSourceRecord() {
+        SourceRecord fromDocumentKey = rewriteDelete("documentKey", "{\"caseNo\": \"201907130000200001\",\"_id\": 1}");
+        SourceRecord fromId = rewriteDelete("id", "{\"_id\": 1,\"tenant\": \"a\"}");
+
+        // The name says which of the two shapes the key holds, downstream of the transformation as well.
+        assertThat(fromDocumentKey.keySchema().fields()).singleElement()
+                .satisfies(field -> assertThat(field.name()).isEqualTo("documentKey"));
+        assertThat(fromId.keySchema().fields()).singleElement()
+                .satisfies(field -> assertThat(field.name()).isEqualTo("id"));
+    }
+
+    @Test
+    @FixFor("debezium/dbz#2337")
+    public void shouldTakeIdOutOfDocumentKeyWhenRewritingDeletes() {
+        SourceRecord transformed = rewriteDelete("documentKey", "{\"caseNo\": \"201907130000200001\",\"_id\": 1}");
+
+        assertThat(((Struct) transformed.value()).get("_id")).isEqualTo(1);
+    }
+
+    @Test
+    @FixFor("debezium/dbz#2337")
+    public void shouldKeepCompositeIdWhenRewritingDeletes() {
+        SourceRecord transformed = rewriteDelete("id", "{\"_id\": 1,\"tenant\": \"a\"}");
+
+        Struct id = (Struct) ((Struct) transformed.value()).get("_id");
+        assertThat(id.get("_id")).isEqualTo(1);
+        assertThat(id.get("tenant")).isEqualTo("a");
+    }
+
+    private SourceRecord rewriteDelete(String keyFieldName, String key) {
+        ExtractNewDocumentState<SourceRecord> smt = new ExtractNewDocumentState<>();
+        smt.configure(Collect.hashMapOf(
+                "array.encoding", "array",
+                "delete.tombstone.handling.mode", "rewrite",
+                "delete.tombstone.handling.mode.rewrite-with-id", "true"));
+
+        Schema keySchema = SchemaBuilder.struct()
+                .name("mongo.dbA.orders.Key")
+                .field(keyFieldName, Schema.STRING_SCHEMA)
+                .build();
+        Struct keyStruct = new Struct(keySchema).put(keyFieldName, key);
+
+        Schema updateDescriptionSchema = SchemaBuilder.struct()
+                .name("mongo.dbA.orders.updateDescription")
+                .field("updatedFields", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("removedFields", SchemaBuilder.array(Schema.STRING_SCHEMA).optional().build())
+                .field("truncatedArrays", SchemaBuilder.array(Schema.STRING_SCHEMA).optional().build())
+                .optional()
+                .build();
+
+        Schema valueSchema = SchemaBuilder.struct()
+                .name("mongo.dbA.orders.Envelope")
+                .field("before", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("after", Schema.OPTIONAL_STRING_SCHEMA)
+                .field("updateDescription", updateDescriptionSchema)
+                .field("op", Schema.STRING_SCHEMA)
+                .build();
+        Struct valueStruct = new Struct(valueSchema).put("op", "d");
+
+        final SourceRecord eventRecord = new SourceRecord(
+                new HashMap<>(),
+                new HashMap<>(),
+                "mongo.dbA.orders",
+                keySchema,
+                keyStruct,
+                valueSchema,
+                valueStruct);
+
+        try {
+            return smt.apply(eventRecord);
+        }
+        finally {
+            smt.close();
+        }
     }
 }
