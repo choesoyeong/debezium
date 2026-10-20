@@ -10,6 +10,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -89,6 +90,47 @@ public class DefaultChunkQueryBuilderTest {
 
     private static ChunkQueryBuilder.QueryParam qp(Column column, Object value) {
         return new ChunkQueryBuilder.QueryParam(column, value);
+    }
+
+    @Test
+    public void estimateRowCountDelegatesToConnectionHook() {
+        final JdbcConnection connection = new JdbcConnection(config().getJdbcConfig(), c -> null, "\"", "\"") {
+            @Override
+            public OptionalLong readRowCountEstimate(TableId tableId) {
+                return OptionalLong.of(4242L);
+            }
+        };
+        final ChunkQueryBuilder<TableId> chunkQueryBuilder = new DefaultChunkQueryBuilder<>(config(), connection);
+        final Table table = Table.editor().tableId(new TableId(null, "s1", "table1"))
+                .addColumn(Column.editor().name("pk1").optional(false).create())
+                .setPrimaryKeyNames("pk1").create();
+
+        assertThat(chunkQueryBuilder.estimateRowCount(new SignalBasedIncrementalSnapshotContext<>(), table))
+                .isEqualTo(OptionalLong.of(4242L));
+    }
+
+    @Test
+    public void estimateRowCountIsEmptyByDefault() {
+        final ChunkQueryBuilder<TableId> chunkQueryBuilder = new DefaultChunkQueryBuilder<>(
+                config(), new JdbcConnection(config().getJdbcConfig(), c -> null, "\"", "\""));
+        final Table table = Table.editor().tableId(new TableId(null, "s1", "table1"))
+                .addColumn(Column.editor().name("pk1").optional(false).create())
+                .setPrimaryKeyNames("pk1").create();
+
+        assertThat(chunkQueryBuilder.estimateRowCount(new SignalBasedIncrementalSnapshotContext<>(), table))
+                .isEqualTo(OptionalLong.empty());
+    }
+
+    @Test
+    public void countRowsReturnsEmptyForNullMaximumKey() {
+        final ChunkQueryBuilder<TableId> chunkQueryBuilder = new DefaultChunkQueryBuilder<>(
+                config(), new JdbcConnection(config().getJdbcConfig(), c -> null, "\"", "\""));
+        final Table table = Table.editor().tableId(new TableId(null, "s1", "table1"))
+                .addColumn(Column.editor().name("pk1").optional(false).create())
+                .setPrimaryKeyNames("pk1").create();
+
+        assertThat(chunkQueryBuilder.countRows(new SignalBasedIncrementalSnapshotContext<>(), table, Optional.empty(), null))
+                .isEqualTo(OptionalLong.empty());
     }
 
     @Test
@@ -324,7 +366,7 @@ public class DefaultChunkQueryBuilderTest {
     }
 
     @Test
-    @FixFor("DBZ-5727")
+    @FixFor({ "DBZ-5727", "debezium/dbz#488" })
     public void testBuildProjectionWithColumnExcludeList() {
         final RelationalDatabaseConnectorConfig config = buildConfig(config().getJdbcConfig().edit()
                 .with(RelationalDatabaseConnectorConfig.COLUMN_EXCLUDE_LIST, ".*\\.(pk2|val3)$").build());
@@ -332,7 +374,21 @@ public class DefaultChunkQueryBuilderTest {
                 config, new JdbcConnection(config.getJdbcConfig(), c -> null, "\"", "\""));
         final IncrementalSnapshotContext<TableId> context = new SignalBasedIncrementalSnapshotContext<>();
         String actualProjection = chunkQueryBuilder.buildChunkQuery(context, createTwoPrimaryKeysTable(), Optional.empty());
-        String expectedProjection = "SELECT \"pk1\", \"val1\", \"val2\" FROM \"s1\".\"table1\" ORDER BY \"pk1\", \"pk2\" LIMIT 1024";
+        String expectedProjection = "SELECT \"pk1\", \"pk2\", \"val1\", \"val2\" FROM \"s1\".\"table1\" ORDER BY \"pk1\", \"pk2\" LIMIT 1024";
+        assertThat(actualProjection).isEqualTo(expectedProjection);
+    }
+
+    @Test
+    @FixFor("debezium/dbz#488")
+    public void testBuildProjectionWithExcludedMessageKeyColumn() {
+        final RelationalDatabaseConnectorConfig config = buildConfig(config().getJdbcConfig().edit()
+                .with(RelationalDatabaseConnectorConfig.MSG_KEY_COLUMNS, "s1.table1:pk2")
+                .with(RelationalDatabaseConnectorConfig.COLUMN_EXCLUDE_LIST, ".*\\.(pk1|pk2)$").build());
+        final ChunkQueryBuilder<TableId> chunkQueryBuilder = new DefaultChunkQueryBuilder<>(
+                config, new JdbcConnection(config.getJdbcConfig(), c -> null, "\"", "\""));
+        final IncrementalSnapshotContext<TableId> context = new SignalBasedIncrementalSnapshotContext<>();
+        String actualProjection = chunkQueryBuilder.buildChunkQuery(context, createTwoPrimaryKeysTable(), Optional.empty());
+        String expectedProjection = "SELECT \"pk2\", \"val1\", \"val2\", \"val3\" FROM \"s1\".\"table1\" ORDER BY \"pk2\" LIMIT 1024";
         assertThat(actualProjection).isEqualTo(expectedProjection);
     }
 

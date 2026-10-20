@@ -59,6 +59,11 @@ public class MySqlAntlrDdlParserTest
     }
 
     @Override
+    protected MySqlAntlrDdlParser getParser(SimpleDdlParserListener listener, BinlogConnectorConfig.RealHandlingMode realHandlingMode) {
+        return new MySqlDdlParserWithSimpleTestListener(listener, realHandlingMode);
+    }
+
+    @Override
     protected MySqlValueConverters getValueConverters() {
         return new MySqlValueConvertersFactory().create(
                 RelationalDatabaseConnectorConfig.DecimalHandlingMode.parse(JdbcValueConverters.DecimalMode.DOUBLE.name()),
@@ -115,6 +120,29 @@ public class MySqlAntlrDdlParserTest
 
         parser.parse("FLUSH TABLES mysql.user, other.tbl FOR EXPORT", tables);
         assertThat(parser.getParsingExceptionsFromWalker()).isEmpty();
+    }
+
+    @Test
+    @FixFor("debezium/dbz#2673")
+    public void shouldParseJsonValueWithReturningAndNoOnEmptyOrError() {
+        final String ddl = "CREATE TABLE mdp_build_task ("
+                + "id bigint unsigned NOT NULL AUTO_INCREMENT,"
+                + "response text,"
+                + "is_show_coverage tinyint(1) GENERATED ALWAYS AS "
+                + "((json_value(ifnull(response,_utf8mb4'{}'), _utf8mb4'$.is_show_coverage' returning char(512)) = _utf8mb4'true')) STORED,"
+                + "PRIMARY KEY (id)"
+                + ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;";
+
+        parser.parse(ddl, tables);
+        assertThat(parser.getParsingExceptionsFromWalker()).isEmpty();
+
+        Table table = tables.forTable(null, null, "mdp_build_task");
+        assertThat(table).isNotNull();
+        assertThat(table.columns()).hasSize(3);
+
+        Column generated = table.columnWithName("is_show_coverage");
+        assertThat(generated).isNotNull();
+        assertThat(generated.typeName()).isEqualTo("TINYINT");
     }
 
     @Test
@@ -252,8 +280,17 @@ public class MySqlAntlrDdlParserTest
             this(changesListener, includeViews, includeComments, TableFilter.includeAll());
         }
 
+        MySqlDdlParserWithSimpleTestListener(DdlChanges changesListener, BinlogConnectorConfig.RealHandlingMode realHandlingMode) {
+            this(changesListener, false, false, TableFilter.includeAll(), realHandlingMode);
+        }
+
         private MySqlDdlParserWithSimpleTestListener(DdlChanges changesListener, boolean includeViews, boolean includeComments, TableFilter tableFilter) {
-            super(false, includeViews, includeComments, tableFilter, new MySqlCharsetRegistry());
+            this(changesListener, includeViews, includeComments, tableFilter, BinlogConnectorConfig.RealHandlingMode.DOUBLE);
+        }
+
+        private MySqlDdlParserWithSimpleTestListener(DdlChanges changesListener, boolean includeViews, boolean includeComments, TableFilter tableFilter,
+                                                     BinlogConnectorConfig.RealHandlingMode realHandlingMode) {
+            super(false, includeViews, includeComments, tableFilter, new MySqlCharsetRegistry(), realHandlingMode);
             this.ddlChanges = changesListener;
         }
     }

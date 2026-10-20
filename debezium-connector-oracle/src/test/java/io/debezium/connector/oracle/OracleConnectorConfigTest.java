@@ -213,7 +213,7 @@ public class OracleConnectorConfigTest {
     }
 
     @Test
-    @FixFor("DBZ-3557")
+    @FixFor({ "DBZ-3557", "debezium/dbz#2787" })
     public void testSnapshotLockMode() throws Exception {
         final Field snapshotLockMode = OracleConnectorConfig.SNAPSHOT_LOCKING_MODE;
 
@@ -234,6 +234,17 @@ public class OracleConnectorConfigTest {
 
         connectorConfig = new OracleConnectorConfig(config);
         assertThat(connectorConfig.getSnapshotLockingMode().get().usesLocking()).isFalse();
+
+        config = Configuration.create()
+                .with(CommonConnectorConfig.TOPIC_PREFIX, "myserver")
+                .with(snapshotLockMode, "extended")
+                .build();
+
+        assertThat(config.validateAndRecord(Collections.singletonList(snapshotLockMode), LOGGER::error)).isTrue();
+
+        connectorConfig = new OracleConnectorConfig(config);
+        assertThat(connectorConfig.getSnapshotLockingMode().get()).isEqualTo(OracleConnectorConfig.SnapshotLockingMode.EXTENDED);
+        assertThat(connectorConfig.getSnapshotLockingMode().get().usesLocking()).isTrue();
     }
 
     @Test
@@ -561,6 +572,19 @@ public class OracleConnectorConfigTest {
                 OracleConnectorConfig.LOG_MINING_BUFFER_TRACK_USERNAME,
                 OracleConnectorConfig.LOG_MINING_BUFFER_TRACK_CLIENT_ID);
         assertThat(config.validateAndRecord(fields, LOGGER::error)).isTrue();
+    }
+
+    @Test
+    @FixFor("dbz#2598")
+    public void testStrategiesWhoseDictionaryCanDriftFromTheRedoBeingMined() {
+        // Mining leans on the connector's own relational model for these strategies, because LogMiner
+        // can report an object that its data dictionary does not describe. A strategy added without
+        // deciding which side it falls on should fail here rather than silently drop such events.
+        assertThat(Stream.of(OracleConnectorConfig.LogMiningStrategy.values())
+                .filter(OracleConnectorConfig.LogMiningStrategy::isDictionaryMismatchPossible))
+                .containsExactlyInAnyOrder(
+                        OracleConnectorConfig.LogMiningStrategy.HYBRID,
+                        OracleConnectorConfig.LogMiningStrategy.DICTIONARY_FROM_FILE);
     }
 
     private static Configuration.Builder logMinerConfig(String adapter) {

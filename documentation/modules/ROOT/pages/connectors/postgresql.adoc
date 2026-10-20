@@ -255,6 +255,12 @@ endif::community[]
 |===
 
 // Type: concept
+[id="debezium-postgresql-chunk-based-parallel-snapshots"]
+=== Chunk-based parallel snapshots
+
+include::{partialsdir}/modules/all-connectors/con-connector-chunk-based-parallel-snapshots.adoc[leveloffset=+3]
+
+// Type: concept
 // ModuleID: debezium-postgresql-ad-hoc-snapshots
 [id="postgresql-ad-hoc-snapshots"]
 === Ad hoc snapshots
@@ -1455,6 +1461,7 @@ Details are in the following sections:
 
 * xref:postgresql-basic-types[]
 * xref:postgresql-temporal-types[]
+* xref:postgresql-date-type[]
 * xref:postgresql-timestamp-type[]
 * xref:postgresql-decimal-types[]
 * xref:postgresql-hstore-type[]
@@ -1994,6 +2001,40 @@ Contains signed `years`, `months`, `days`, `hours`, `minutes`, `seconds`, `nanos
 
 |===
 
+
+[id="postgresql-date-type"]
+=== DATE type
+
+PostgreSQL supports `infinity` and `-infinity` values in `DATE` columns.
+Only the `structured` precision mode can represent infinity directly, so in every other `time.precision.mode`, the connector converts these values to a specific sentinel value.
+The sentinel values are the dates `+5877611-06-21` and `-5877611-06-22`, which lie outside the range of dates that PostgreSQL itself supports (4713 BC to 5874897 AD), so they cannot be mistaken for a stored date.
+The connector emits the same value for a scalar `DATE` and for a `DATE[]` element, and in snapshots and in streaming, with either logical decoding plug-in.
+
+The following table shows the value that the connector emits for each `time.precision.mode` setting:
+
+[cols="30%a,35%a,35%a",options="header"]
+|===
+|`time.precision.mode`
+|`infinity`
+|`-infinity`
+
+|`adaptive`, `adaptive_time_microseconds`, `microseconds`, `nanoseconds` (`io.debezium.time.Date`)
+|`2146033979`
+|`-2147472691`
+
+|`connect` (`org.apache.kafka.connect.data.Date`)
+|`185417335785600000` milliseconds since the epoch
+|`-185541640502400000` milliseconds since the epoch
+
+|`isostring` (`io.debezium.time.IsoDate`)
+|`+5877611-06-21Z`
+|`-5877611-06-22Z`
+
+|`structured` (`io.debezium.time.StructuredDate`)
+|`specialValue` is `POSITIVE_INFINITY`
+|`specialValue` is `NEGATIVE_INFINITY`
+
+|===
 
 [id="postgresql-timestamp-type"]
 === TIMESTAMP type
@@ -3424,14 +3465,6 @@ Set this parameter on the primary server to specify the physical replication slo
 |`no_validation`
 |Specifies how the connector handles mismatches between the stored offset LSN and the replication slot's confirmed flush LSN when the connector starts.
 
-[IMPORTANT]
-====
-The `offset.mismatch.strategy` property is a Technology Preview feature.
-Technology Preview features are not supported with Red{nbsp}Hat production service level agreements (SLAs) and might not be functionally complete.
-Red{nbsp}Hat does not recommend using them in production.
-These features provide early access to upcoming product features, enabling customers to test functionality and provide feedback during the development process.
-For more information about the support scope of Red{nbsp}Hat Technology Preview features, see link:https://access.redhat.com/support/offerings/techpreview/[Technology Preview Features Support Scope].
-====
 This property replaces the deprecated `internal.slot.seek.to.known.offset.on.start` boolean property.
 
 A mismatch can occur in several scenarios:
@@ -4436,6 +4469,7 @@ For example to request the publisher to send all changes, that is, changes that 
 |`__debezium_unavailable_value`
 |Specifies the constant that the connector provides to indicate that the original value is a toasted value that is not provided by the database.
 If the setting of `unavailable.value.placeholder` starts with the `hex:` prefix it is expected that the rest of the string represents hexadecimally encoded octets.
+If the rest of the string is not an even number of hexadecimal characters, the connector configuration fails validation.
 For more information, see xref:postgresql-toasted-values[toasted values].
 
 |[[postgresql-property-provide-transaction-metadata]]<<postgresql-property-provide-transaction-metadata, `+provide.transaction.metadata+`>>
@@ -4498,18 +4532,12 @@ Use this mode to prevent WAL growth on low-activity databases where monitored ta
 NOTE: When using `connector_and_driver` mode, the JDBC driver's keep-alive mechanism can flush the server-reported keep-alive LSN, which may advance the replication slot beyond the stored offset when non-monitored WAL activity occurs.
 If you use a persistent offset store, configure xref:postgresql-property-offset-mismatch-strategy[`offset.mismatch.strategy`] to `trust_slot` or `trust_greater_lsn` to enable automatic recovery.
 +
-NOTE: Because `connector_and_driver` mode requires periodic opportunities to propagate LSNs to Kafka, when xref:postgresql-property-heartbeat-interval-ms[`heartbeat.interval.ms`] = 0 and
-xref:postgresql-property-provide-transaction-metadata[`provide.transaction.metadata`] = false, the connector internally sets xref:postgresql-property-heartbeat-interval-ms[`heartbeat.interval.ms`] to 600000 (10 minutes).
+NOTE: Because `connector_and_driver` mode requires periodic opportunities to propagate LSNs to Kafka, when xref:postgresql-property-heartbeat-interval-ms[`heartbeat.interval.ms`] is set to `0` and
+xref:postgresql-property-provide-transaction-metadata[`provide.transaction.metadata`] is set to `false`, the connector internally sets xref:postgresql-property-heartbeat-interval-ms[`heartbeat.interval.ms`] to 600000 (10 minutes).
+ifdef::community[]
 +
-[IMPORTANT]
-====
-The `connector_and_driver` mode is a Technology Preview feature.
-Technology Preview features are not supported with Red{nbsp}Hat production service level agreements (SLAs) and might not be functionally complete.
-Red Hat does not recommend using them in production.
-These features provide early access to upcoming product features, enabling customers to test functionality and provide feedback during the development process.
-For more information about the support scope of Red{nbsp}Hat Technology Preview features, see link:https://access.redhat.com/support/offerings/techpreview/[Technology Preview Features Support Scope].
 If you use an ephemeral offset store such as `org.apache.kafka.connect.storage.MemoryOffsetBackingStore`, no additional configuration is needed because the connector always defers to the replication slot position on startup.
-====
+endif::community[]
 
 |[[postgresql-property-lsn-flush-timeout-action]]<<postgresql-property-lsn-flush-timeout-action, `+lsn.flush.timeout.action+`>>
 |`fail`
@@ -4661,24 +4689,78 @@ For example, if the topic prefix is `fulfillment`, the default topic name is `fu
 |[[postgresql-property-snapshot-max-threads]]<<postgresql-property-snapshot-max-threads, `snapshot.max.threads`>>
 |`1`
 |Specifies the number of threads that the connector uses when performing an initial snapshot.
-To enable parallel initial snapshots, set the property to a value greater than 1.
-In a parallel initial snapshot, the connector processes multiple tables concurrently.
+The value must be a positive integer greater than or equal to `1`.
+When set to a value greater than `1`, the connector performs a parallel snapshot by dividing each table into chunks based on primary key ranges and processing the chunks concurrently across all available threads.
+
+ifdef::product[]
+[IMPORTANT]
+====
+Chunk-based parallel snapshotting is a Technology Preview feature.
+Technology Preview features are not supported with Red{nbsp}Hat production service level agreements (SLAs) and might not be functionally complete.
+Red{nbsp}Hat does not recommend using them in production.
+These features provide early access to upcoming product features, enabling customers to test functionality and provide feedback during the development process.
+For more information about the support scope of Red{nbsp}Hat Technology Preview features, see link:https://access.redhat.com/support/offerings/techpreview/[Technology Preview Features Support Scope].
+====
+endif::product[]
 
 [NOTE]
 ====
-When you enable parallel initial snapshots, the threads that perform each table snapshot can require varying times to complete their work.
-If a snapshot for one table requires significantly more time to complete than the snapshots for other tables, threads that have completed their work sit idle.
-In some environments, a network device such as a load balancer or firewall, terminates connections that remain idle for an extended interval.
-After the snapshot completes, the connector is unable to close the connection, resulting in an exception, and an incomplete snapshot, even in cases where the connector successfully transmitted all snapshot data.
-
-If you experience this problem, revert the value of `snapshot.max.threads` to `1`, and retry the snapshot.
+Tables without a primary key, and tables that use snapshot select overrides, are processed as a single chunk and fall back to single-threaded snapshotting.
 ====
+
+|[[postgresql-property-snapshot-max-threads-multiplier]]<<postgresql-property-snapshot-max-threads-multiplier, `+snapshot.max.threads.multiplier+`>>
+|`1`
+|A global multiplier that controls the number of chunks created per table during a parallel snapshot.
+By default, {prodname} creates one chunk per thread.
+A higher value causes the connector to create more, smaller chunks per table when running a snapshot.
+Smaller chunks keep threads more evenly loaded.
+For example, with 4 threads and a multiplier of `2`, {prodname} creates 8 chunks instead of 4.
+
+To override the multiplier for a specific table, set `snapshot.max.threads.multiplier.<fully_qualified_table_name>` to the desired value.
+
+[TIP]
+====
+Increasing the number of threads is generally more effective for improving snapshot throughput than increasing the multiplier.
+====
+
+ifdef::product[]
+[IMPORTANT]
+====
+Chunk-based parallel snapshotting is a Technology Preview feature.
+Technology Preview features are not supported with Red{nbsp}Hat production service level agreements (SLAs) and might not be functionally complete.
+Red{nbsp}Hat does not recommend using them in production.
+These features provide early access to upcoming product features, enabling customers to test functionality and provide feedback during the development process.
+For more information about the support scope of Red{nbsp}Hat Technology Preview features, see link:https://access.redhat.com/support/offerings/techpreview/[Technology Preview Features Support Scope].
+====
+endif::product[]
 
 |[[postgresql-property-legacy-snapshot-max-threads]]<<postgresql-property-legacy-snapshot-max-threads, `+legacy.snapshot.max.threads+`>>
 |`false`
-|Specifies whether the parallel initial snapshot uses the legacy table-per-thread algorithm.
-When set to `false` (the default), the connector will chunk the contents of the source table across all parallel initial snapshot threads for maximum performance.
-When set to `true`, the connector will process each table per thread.
+|The default value (`false`) enables the connector to accelerate initial snapshots by dividing tables into chunks and using separate threads to process each chunk concurrently.
+To revert to the legacy parallel snapshot behavior of processing one table per thread, set the value to `true`.
+
+[NOTE]
+====
+When the legacy behavior is enabled, threads that complete their table snapshot remain idle while waiting for other threads to complete.
+In environments that enforce connection timeouts, idle connections can prevent the connector from closing connections cleanly after the snapshot finishes.
+An exception can then result, even if the snapshot captures all data successfully.
+If you experience this problem, set `snapshot.max.threads` to `1` and retry the snapshot.
+====
+ifdef::community[]
+
+NOTE: The property `internal.legacy.snapshot.max.threads` is a deprecated alias for `legacy.snapshot.max.threads` and should not be used in new configurations.
+endif::community[]
+ifdef::product[]
+
+[IMPORTANT]
+====
+Chunk-based parallel snapshotting is a Technology Preview feature.
+Technology Preview features are not supported with Red{nbsp}Hat production service level agreements (SLAs) and might not be functionally complete.
+Red{nbsp}Hat does not recommend using them in production.
+These features provide early access to upcoming product features, enabling customers to test functionality and provide feedback during the development process.
+For more information about the support scope of Red{nbsp}Hat Technology Preview features, see link:https://access.redhat.com/support/offerings/techpreview/[Technology Preview Features Support Scope].
+====
+endif::product[]
 
 |[[postgresql-property-custom-metric-tags]]<<postgresql-property-custom-metric-tags, `custom.metric.tags`>>
 |`No default`
@@ -4835,6 +4917,17 @@ include::{partialsdir}/modules/all-connectors/frag-common-mbean-name.adoc[levelo
 
 include::{partialsdir}/modules/all-connectors/ref-connector-monitoring-streaming-metrics.adoc[leveloffset=+1]
 
+The {prodname} PostgreSQL connector also provides the following custom streaming metric:
+
+[cols="3,2,5",options="header"]
+|===
+|Attribute |Type |Description
+
+|[[postgres-streaming-metrics-total-number-of-logical-message-events-seen]]<<postgres-streaming-metrics-total-number-of-logical-message-events-seen, `+TotalNumberOfLogicalMessageEventsSeen+`>>
+|`long`
+|The total number of logical decoding message events processed by the connector since its last start or metrics reset.
+
+|===
 
 
 // Type: reference

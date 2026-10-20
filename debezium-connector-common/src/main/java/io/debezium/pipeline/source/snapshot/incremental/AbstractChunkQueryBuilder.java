@@ -6,6 +6,7 @@
 package io.debezium.pipeline.source.snapshot.incremental;
 
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -96,8 +97,10 @@ public abstract class AbstractChunkQueryBuilder<T extends DataCollectionId>
         String projection = "*";
         if (connectorConfig.isColumnsFiltered()) {
             TableId tableId = table.id();
+            final List<Column> keyColumns = getKeyMapper().getKeyColumns(table);
             projection = table.columns().stream()
-                    .filter(column -> columnFilter.matches(tableId.catalog(), tableId.schema(), tableId.table(), column.name()))
+                    .filter(column -> keyColumns.contains(column)
+                            || columnFilter.matches(tableId.catalog(), tableId.schema(), tableId.table(), column.name()))
                     .map(column -> jdbcConnection.quoteIdentifier(column.name()))
                     .collect(Collectors.joining(", "));
         }
@@ -280,8 +283,56 @@ public abstract class AbstractChunkQueryBuilder<T extends DataCollectionId>
         return selectWithRowLimits;
     }
 
+    /**
+     * Default implementation delegates to the connector-specific {@link JdbcConnection#readRowCountEstimate(TableId)}
+     * metadata hook, so connectors can contribute an estimate without subclassing the query builder.
+     */
+    @Override
+    public OptionalLong estimateRowCount(IncrementalSnapshotContext<T> context, Table table) {
+        return jdbcConnection.readRowCountEstimate(table.id());
+    }
+
+    @Override
+    public OptionalLong countRows(IncrementalSnapshotContext<T> context, Table table, Optional<String> additionalCondition, Object[] maximumKey) {
+        if (maximumKey == null) {
+            return OptionalLong.empty();
+        }
+        try {
+            final List<Column> pkColumns = getQueryColumns(context, table);
+            final StringBuilder condition = new StringBuilder();
+            addUpperBound(pkColumns, maximumKey, condition, true);
+
+            final StringBuilder sql = new StringBuilder("SELECT COUNT(1) FROM ");
+            sql.append(buildTableReference(table));
+            getTableAlias(table).ifPresent(alias -> sql.append(' ').append(alias));
+            sql.append(" WHERE ").append(condition);
+            additionalCondition.ifPresent(ac -> sql.append(" AND ").append(ac));
+
+            final String countQuery = sql.toString();
+            LOGGER.debug("Incremental snapshot bounded row count query: {}", countQuery);
+
+            try (PreparedStatement statement = jdbcConnection.readTablePreparedStatement(connectorConfig, countQuery, OptionalLong.empty())) {
+                bindBoundaryParams(statement, pkColumns, maximumKey, 1, jdbcConnection);
+                try (ResultSet rs = statement.executeQuery()) {
+                    if (rs.next()) {
+                        return OptionalLong.of(rs.getLong(1));
+                    }
+                }
+            }
+            return OptionalLong.empty();
+        }
+        catch (SQLException | RuntimeException e) {
+            LOGGER.warn("Failed to count rows for table '{}' during incremental snapshot; total row count will be omitted", table.id(), e);
+            return OptionalLong.empty();
+        }
+    }
+
     protected Optional<String> getTableAlias(Table table) {
         return Optional.empty();
+    }
+
+    protected String buildTableReference(Table table) {
+        return jdbcConnection.quotedTableIdString(table.id());
     }
 
     protected KeyMapper getKeyMapper() {
@@ -318,6 +369,6 @@ public abstract class AbstractChunkQueryBuilder<T extends DataCollectionId>
                 return Collections.singletonList(column);
             }
         }
-        return getKeyMapper().getKeyKolumns(table);
+        return getKeyMapper().getKeyColumns(table);
     }
 }

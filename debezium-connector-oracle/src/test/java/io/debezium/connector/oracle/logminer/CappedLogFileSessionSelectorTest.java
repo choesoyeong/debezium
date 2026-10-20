@@ -39,7 +39,7 @@ public class CappedLogFileSessionSelectorTest {
     private static final Scn UPPER_BOUNDS = Scn.valueOf(1000);
 
     // threshold: 2 logs * 1 GB = 2 GB per thread
-    private final CappedLogFileSessionSelector selector = new CappedLogFileSessionSelector(2, 16, ONE_GB, Scn.NULL);
+    private final CappedLogFileSessionSelector selector = new CappedLogFileSessionSelector(2, 16, Scn.NULL);
 
     @Test
     @FixFor("dbz#1713")
@@ -63,7 +63,7 @@ public class CappedLogFileSessionSelectorTest {
     void testSingleThreadExceedsThresholdLastCappedIsArchiveCappedAndTightenedBounds() {
         // arc1(1GB) hits 1 GB, arc2(1GB) hits 2 GB => threshold met, loop breaks after arc2
         // arc3 and redo excluded; last capped = arc2(archive, nextScn=300)
-        // allThreadsMineOnline=false, effectiveUpperBounds tightened to 300
+        // allThreadsMineOnline=false, effectiveUpperBounds tightened to 299 (arc2.nextScn - 1)
         List<LogFile> logs = List.of(
                 createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB),
                 createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB),
@@ -75,7 +75,7 @@ public class CappedLogFileSessionSelectorTest {
 
         assertThat(result.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log");
-        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(300));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
     }
 
     @Test
@@ -117,7 +117,7 @@ public class CappedLogFileSessionSelectorTest {
     void testTwoThreadsThread1HasArchiveLastBoundsTightenedToThread1() {
         // Thread 1: arc1(1GB) + arc2(1GB, nextScn=300) => capped, last=arc2(archive)
         // Thread 2: arc1(1GB) + redo(1GB) => capped at redo, last=redo(online)
-        // Thread 1 sets allThreadsMineOnline=false and effectiveUpperBounds=300
+        // Thread 1 sets allThreadsMineOnline=false and effectiveUpperBounds=299
         List<LogFile> logs = List.of(
                 createArchiveLog("t1_arc1.log", 100, 200, 1, 1, ONE_GB),
                 createArchiveLog("t1_arc2.log", 200, 300, 2, 1, ONE_GB),
@@ -131,7 +131,7 @@ public class CappedLogFileSessionSelectorTest {
 
         assertThat(result.logFiles()).extracting(LogFile::getFileName)
                 .containsExactlyInAnyOrder("t1_arc1.log", "t1_arc2.log", "t2_arc1.log", "t2_redo.log");
-        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(300));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
     }
 
     @Test
@@ -158,7 +158,7 @@ public class CappedLogFileSessionSelectorTest {
     void testTwoThreadsBothArchiveLastBoundsTightenedToFirstThreadProcessed() {
         // Thread 1: arc1(1GB) + arc2(1GB, nextScn=300) => capped, last=arc2(archive)
         // Thread 2: arc1(1GB) + arc2(1GB, nextScn=350) => capped, last=arc2(archive)
-        // Thread 1 sets allThreadsMineOnline=false, effectiveUpperBounds=300
+        // Thread 1 sets allThreadsMineOnline=false, effectiveUpperBounds=299
         // Thread 2 is skipped (allThreadsMineOnline already false)
         List<LogFile> logs = List.of(
                 createArchiveLog("t1_arc1.log", 100, 200, 1, 1, ONE_GB),
@@ -173,7 +173,7 @@ public class CappedLogFileSessionSelectorTest {
 
         assertThat(result.logFiles()).extracting(LogFile::getFileName)
                 .containsExactlyInAnyOrder("t1_arc1.log", "t1_arc2.log", "t2_arc1.log", "t2_arc2.log");
-        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(300));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
     }
 
     @Test
@@ -193,7 +193,7 @@ public class CappedLogFileSessionSelectorTest {
     @FixFor("dbz#1713")
     void testSingleThreadArchiveOnlyWithinThresholdBoundsTightenedToLastArchive() {
         // No online redo present (archive-log-only mode scenario); all archives fit within threshold
-        // last log is archive => allThreadsMineOnline=false, bounds tightened to last archive nextScn
+        // last log is archive => allThreadsMineOnline=false, bounds tightened to last archive nextScn - 1
         List<LogFile> logs = List.of(
                 createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB / 2),
                 createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB / 2));
@@ -203,7 +203,7 @@ public class CappedLogFileSessionSelectorTest {
 
         assertThat(result.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log");
-        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(300));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
     }
 
     @Test
@@ -243,7 +243,7 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection second = selector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(400));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(399));
     }
 
     @Test
@@ -274,7 +274,7 @@ public class CappedLogFileSessionSelectorTest {
                 new LogFilesResult(advancedLogs, singleThreadOpen()), UPPER_BOUNDS);
         assertThat(third.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc2.log", "arc3.log", "arc4.log");
-        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(500));
+        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(499));
     }
 
     @Test
@@ -300,7 +300,7 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection third = selector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(third.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log", "arc4.log");
-        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(500));
+        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(499));
     }
 
     @Test
@@ -314,11 +314,11 @@ public class CappedLogFileSessionSelectorTest {
                 createArchiveLog("arc3.log", 300, 400, 3, 1, ONE_GB),
                 createRedoLog("redo1.log", 400, 4, 1));
 
-        // Call 1: capped at arc1+arc2 (threshold 2GB), mined up to 300
+        // Call 1: capped at arc1+arc2 (threshold 2GB), mined up to 299
         selector.selectLogsForSession(new LogFilesResult(initialLogs, singleThreadOpen()), UPPER_BOUNDS);
 
         // Call 2: watermark advanced (arc1 gone, arc4 added); budget set is arc2+arc3 (top 400),
-        // which already passes the previously mined boundary of 300, so no extension needed
+        // which already passes the previously mined boundary of 299, so no extension needed
         List<LogFile> advancedLogs = List.of(
                 createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB),
                 createArchiveLog("arc3.log", 300, 400, 3, 1, ONE_GB),
@@ -329,7 +329,7 @@ public class CappedLogFileSessionSelectorTest {
                 new LogFilesResult(advancedLogs, singleThreadOpen()), UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc2.log", "arc3.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(400));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(399));
     }
 
     @Test
@@ -350,7 +350,7 @@ public class CappedLogFileSessionSelectorTest {
         selector.selectLogsForSession(initialResult, UPPER_BOUNDS);
 
         // Call 3: watermark advanced (arc1 gone, arc4 added); budget stays at 3,
-        // so budget set is arc2+arc3+arc4, reading up to 500
+        // so budget set is arc2+arc3+arc4, reading up to 499
         List<LogFile> advancedLogs = List.of(
                 createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB),
                 createArchiveLog("arc3.log", 300, 400, 3, 1, ONE_GB),
@@ -360,7 +360,7 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection third = selector.selectLogsForSession(advancedResult, UPPER_BOUNDS);
         assertThat(third.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc2.log", "arc3.log", "arc4.log");
-        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(500));
+        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(499));
 
         // Call 4: same budget set => grow to 4; budget now covers past the online redo boundary,
         // extension reaches online redo => all threads mine online, budget resets to minimum
@@ -389,7 +389,7 @@ public class CappedLogFileSessionSelectorTest {
     void testTwoThreadsBothArchiveLastBoundsTightenedToSmallestNextScn() {
         // Thread 1: arc1(1GB)+arc2(1GB, nextScn=300) => capped, last=arc2(archive)
         // Thread 2: arc1(1GB)+arc2(1GB, nextScn=200) => capped, last=arc2(archive)
-        // Both threads end on archive; effectiveUpperBounds must be the minimum across both (200, not 300)
+        // Both threads end on archive; effectiveUpperBounds must be the minimum across both (199, not 299)
         List<LogFile> logs = List.of(
                 createArchiveLog("t1_arc1.log", 100, 200, 1, 1, ONE_GB),
                 createArchiveLog("t1_arc2.log", 200, 300, 2, 1, ONE_GB),
@@ -403,7 +403,7 @@ public class CappedLogFileSessionSelectorTest {
 
         assertThat(result.logFiles()).extracting(LogFile::getFileName)
                 .containsExactlyInAnyOrder("t1_arc1.log", "t1_arc2.log", "t2_arc1.log", "t2_arc2.log");
-        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(200));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(199));
     }
 
     @Test
@@ -412,7 +412,7 @@ public class CappedLogFileSessionSelectorTest {
         // A long-running transaction pins the lower watermark, so every collection returns the
         // same log list. Each selection must still advance the upper boundary past the previous
         // one; a boundary that repeats produces a session that re-reads redo and emits nothing.
-        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
 
         List<LogFile> logs = List.of(
                 createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB),
@@ -421,21 +421,21 @@ public class CappedLogFileSessionSelectorTest {
                 createRedoLog("redo1.log", 400, 4, 1));
         LogFilesResult result = new LogFilesResult(logs, singleThreadOpen());
 
-        // Call 1: capped at arc1, reading up to 200
+        // Call 1: capped at arc1, reading up to 199
         SessionLogSelection first = pinnedSelector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(first.logFiles()).extracting(LogFile::getFileName).containsExactly("arc1.log");
-        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(200));
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(199));
 
-        // Call 2: byte cap alone would repeat arc1/200; the window extends past the mined boundary
+        // Call 2: byte cap alone would repeat arc1/199; the window extends past the mined boundary
         SessionLogSelection second = pinnedSelector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName).containsExactly("arc1.log", "arc2.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(300));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
 
         // Call 3: advances again
         SessionLogSelection third = pinnedSelector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(third.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log");
-        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(400));
+        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(399));
 
         // Call 4: advancing past 400 requires the online redo log; thread now mines online
         SessionLogSelection fourth = pinnedSelector.selectLogsForSession(result, UPPER_BOUNDS);
@@ -449,7 +449,7 @@ public class CappedLogFileSessionSelectorTest {
         // An online-mode pass mines to the online upper boundary; a later capped selection from
         // the still-pinned watermark must not regress below it (the dbz#2326 point-3 trace where
         // "Using capped logs, reading up to <scn>" repeated a boundary below an earlier online pass).
-        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
 
         // Call 1: online mode, mined up to 500
         List<LogFile> initialLogs = List.of(
@@ -472,7 +472,7 @@ public class CappedLogFileSessionSelectorTest {
                 new LogFilesResult(advancedLogs, singleThreadOpen()), UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log", "arc4.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(550));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(549));
     }
 
     @Test
@@ -499,7 +499,7 @@ public class CappedLogFileSessionSelectorTest {
         // RAC: after mining to 220, the watermark advances (thread 1's starting log changes) so
         // the budget set differs and growth does not fire. Thread 2's byte-capped top (220) is
         // at the mined boundary and must extend; thread 1's top (350) is already beyond it.
-        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
 
         List<LogFile> initialLogs = List.of(
                 createArchiveLog("t1_arc1.log", 100, 250, 1, 1, ONE_GB),
@@ -507,10 +507,10 @@ public class CappedLogFileSessionSelectorTest {
                 createArchiveLog("t2_arc1.log", 100, 220, 1, 2, ONE_GB),
                 createRedoLog("t2_redo.log", 220, 2, 2));
 
-        // Call 1: capped at each thread's first archive; boundary = min(250, 220) = 220
+        // Call 1: capped at each thread's first archive; boundary = min(250, 220) - 1 = 219
         SessionLogSelection first = pinnedSelector.selectLogsForSession(
                 new LogFilesResult(initialLogs, twoThreadsOpen()), UPPER_BOUNDS);
-        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(220));
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(219));
 
         // Call 2: thread 1 advanced (arc1 gone, arc2 appeared); thread 2 has a new archive log
         // but its budget-capped window still starts at t2_arc1. Budget set differs from call 1
@@ -526,7 +526,7 @@ public class CappedLogFileSessionSelectorTest {
                 new LogFilesResult(advancedLogs, twoThreadsOpen()), UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactlyInAnyOrder("t1_arc2.log", "t2_arc1.log", "t2_arc2.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(330));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(329));
     }
 
     @Test
@@ -536,7 +536,7 @@ public class CappedLogFileSessionSelectorTest {
         // A commits but transaction B pins at arc2; the watermark shifts from arc1 to arc2.
         // The budget carries forward (no reset) and continues growing from the carried value
         // to find B's commit, avoiding wasted re-climb iterations from minimum.
-        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
 
         // Calls 1-3: pinned at arc1, budget grows 1 -> 2 -> 3
         List<LogFile> pinnedLogs = List.of(
@@ -552,11 +552,11 @@ public class CappedLogFileSessionSelectorTest {
         pinnedSelector.selectLogsForSession(pinnedResult, UPPER_BOUNDS);
         // Call 2: same => grow to 2, set={arc1,arc2}
         pinnedSelector.selectLogsForSession(pinnedResult, UPPER_BOUNDS);
-        // Call 3: same => grow to 3, set={arc1,arc2,arc3}, boundary=400
+        // Call 3: same => grow to 3, set={arc1,arc2,arc3}, boundary=399
         SessionLogSelection third = pinnedSelector.selectLogsForSession(pinnedResult, UPPER_BOUNDS);
         assertThat(third.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log");
-        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(400));
+        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(399));
 
         // Transaction A commits; watermark shifts to arc2 (transaction B pins there).
         // Budget carries forward at 3; budget set={arc2,arc3,arc4} differs from previous => no growth
@@ -571,13 +571,13 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection fourth = pinnedSelector.selectLogsForSession(shiftedResult, UPPER_BOUNDS);
         assertThat(fourth.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc2.log", "arc3.log", "arc4.log");
-        assertThat(fourth.effectiveUpperBounds()).isEqualTo(Scn.valueOf(500));
+        assertThat(fourth.effectiveUpperBounds()).isEqualTo(Scn.valueOf(499));
 
         // Call 5: still pinned at arc2, budget set unchanged => grow to 4, set={arc2,arc3,arc4,arc5}
         SessionLogSelection fifth = pinnedSelector.selectLogsForSession(shiftedResult, UPPER_BOUNDS);
         assertThat(fifth.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc2.log", "arc3.log", "arc4.log", "arc5.log");
-        assertThat(fifth.effectiveUpperBounds()).isEqualTo(Scn.valueOf(600));
+        assertThat(fifth.effectiveUpperBounds()).isEqualTo(Scn.valueOf(599));
 
         // Call 6: grow to 5, reaches online redo => all threads online, budget resets
         SessionLogSelection sixth = pinnedSelector.selectLogsForSession(shiftedResult, UPPER_BOUNDS);
@@ -592,9 +592,9 @@ public class CappedLogFileSessionSelectorTest {
         // Forced log switches (ARCHIVE_LAG_TARGET) produce new small archive logs at the tail
         // while the watermark is pinned. The budget set is unchanged (tail logs are beyond the
         // byte threshold) so growth fires correctly on each iteration.
-        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
 
-        // Call 1: budget=1, set={arc1}; boundary=200
+        // Call 1: budget=1, set={arc1}; boundary=199
         List<LogFile> initialLogs = List.of(
                 createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB),
                 createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB),
@@ -603,11 +603,11 @@ public class CappedLogFileSessionSelectorTest {
                 new LogFilesResult(initialLogs, singleThreadOpen()), UPPER_BOUNDS);
         assertThat(first.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log");
-        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(200));
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(199));
 
         // Call 2: forced switch added a small runt (arc3, 27MB) at the tail; the full log list
         // changed but the budget set is still {arc1} (1GB threshold met at arc1) => growth fires,
-        // budget=2, set={arc1,arc2}; boundary=300
+        // budget=2, set={arc1,arc2}; boundary=299
         List<LogFile> switchedLogs1 = List.of(
                 createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB),
                 createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB),
@@ -617,7 +617,7 @@ public class CappedLogFileSessionSelectorTest {
                 new LogFilesResult(switchedLogs1, singleThreadOpen()), UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(300));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
 
         // Call 3: another forced switch added arc4 (29MB); budget set still {arc1,arc2} (2GB
         // threshold met at arc2) => growth fires, budget=3. At 3GB threshold the small runts
@@ -684,13 +684,13 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection first = selector.selectLogsForSession(cappedResult, UPPER_BOUNDS);
         assertThat(first.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log");
-        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(300));
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
 
         // Second capped call with the same set: growth fires => arc1+arc2+arc3
         SessionLogSelection second = selector.selectLogsForSession(cappedResult, UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(400));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(399));
     }
 
     @Test
@@ -699,7 +699,7 @@ public class CappedLogFileSessionSelectorTest {
         // Restart mid-pin: the boundary seeded from the restored offsets re-derives the window
         // width on the first selection, so the session resumes at the pre-restart width and
         // extends past the already-mined ground instead of re-climbing from the minimum.
-        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.valueOf(400));
+        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, Scn.valueOf(400));
 
         List<LogFile> logs = List.of(
                 createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB),
@@ -715,13 +715,13 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection first = seededSelector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(first.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log", "arc4.log");
-        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(500));
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(499));
 
         // Call 2: growth continues from the derived count (3 -> 4), not from the minimum
         SessionLogSelection second = seededSelector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log", "arc4.log", "arc5.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(600));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(599));
     }
 
     @Test
@@ -735,16 +735,16 @@ public class CappedLogFileSessionSelectorTest {
 
         // Seed at the resume position: no logs lie below it, derived count stays at minimum
         // and the extension has nothing to push past
-        CappedLogFileSessionSelector atResumeSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.valueOf(100));
+        CappedLogFileSessionSelector atResumeSelector = new CappedLogFileSessionSelector(1, 16, Scn.valueOf(100));
         SessionLogSelection atResume = atResumeSelector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(atResume.logFiles()).extracting(LogFile::getFileName).containsExactly("arc1.log");
-        assertThat(atResume.effectiveUpperBounds()).isEqualTo(Scn.valueOf(200));
+        assertThat(atResume.effectiveUpperBounds()).isEqualTo(Scn.valueOf(199));
 
         // A none/null seed (no commits recorded in the offsets yet) is ignored entirely
-        CappedLogFileSessionSelector nullSeedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector nullSeedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
         SessionLogSelection nullSeed = nullSeedSelector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(nullSeed.logFiles()).extracting(LogFile::getFileName).containsExactly("arc1.log");
-        assertThat(nullSeed.effectiveUpperBounds()).isEqualTo(Scn.valueOf(200));
+        assertThat(nullSeed.effectiveUpperBounds()).isEqualTo(Scn.valueOf(199));
     }
 
     @Test
@@ -752,7 +752,7 @@ public class CappedLogFileSessionSelectorTest {
     void testSeededBoundaryWithinOnlineRedoRunsOnlinePass() {
         // The connector was mining online redo before the restart; the seeded boundary lies within
         // the current log, so the first selection reaches the online redo and runs an online pass
-        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.valueOf(800));
+        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, Scn.valueOf(800));
 
         List<LogFile> logs = List.of(
                 createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB),
@@ -769,7 +769,7 @@ public class CappedLogFileSessionSelectorTest {
     void testSeedDerivationUsesWidestSpanAcrossThreads() {
         // RAC: the derived count reflects the widest per-thread byte span below the seeded
         // boundary, so no thread's window collapses below its pre-restart width
-        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.valueOf(500));
+        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, Scn.valueOf(500));
 
         List<LogFile> logs = List.of(
                 createArchiveLog("t1_arc1.log", 100, 300, 1, 1, ONE_GB),
@@ -786,7 +786,7 @@ public class CappedLogFileSessionSelectorTest {
                 new LogFilesResult(logs, twoThreadsOpen()), UPPER_BOUNDS);
         assertThat(result.logFiles()).extracting(LogFile::getFileName)
                 .containsExactlyInAnyOrder("t1_arc1.log", "t1_arc2.log", "t1_arc3.log", "t2_arc1.log", "t2_arc2.log");
-        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(650));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(649));
     }
 
     @Test
@@ -795,7 +795,7 @@ public class CappedLogFileSessionSelectorTest {
         // The Finding 2 payoff: with forced-switch runts below the seeded boundary, the derived
         // byte width covers all of them plus a full log beyond in the first session, where an
         // unseeded restart would crawl one log per session from the minimum
-        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.valueOf(500));
+        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, Scn.valueOf(500));
 
         List<LogFile> logs = List.of(
                 createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB),
@@ -812,7 +812,7 @@ public class CappedLogFileSessionSelectorTest {
                 new LogFilesResult(logs, singleThreadOpen()), UPPER_BOUNDS);
         assertThat(result.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "runt2.log", "runt3.log", "arc4.log", "arc5.log");
-        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(600));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(599));
     }
 
     @Test
@@ -824,7 +824,7 @@ public class CappedLogFileSessionSelectorTest {
         // catch-up slice honors the ceiling instead of the unclamped derivation
         final LogInterceptor interceptor = new LogInterceptor(CappedLogFileSessionSelector.class);
         interceptor.setLoggerLevel(CappedLogFileSessionSelector.class, Level.DEBUG);
-        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.valueOf(2000));
+        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 16, Scn.valueOf(2000));
         final Scn upperBounds = Scn.valueOf(5000);
 
         List<LogFile> pinnedLogs = new ArrayList<>();
@@ -838,7 +838,7 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection first = seededSelector.selectLogsForSession(
                 new LogFilesResult(pinnedLogs, singleThreadOpen()), upperBounds);
         assertThat(first.logFiles()).hasSize(20);
-        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(2100));
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(2099));
         assertThat(interceptor.containsMessage("Derived log count per redo thread 19")).isTrue();
 
         // Call 2: the pinned transaction committed within the first window and the watermark
@@ -856,7 +856,7 @@ public class CappedLogFileSessionSelectorTest {
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .startsWith("arc21.log")
                 .endsWith("arc36.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(3700));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(3699));
     }
 
     @Test
@@ -864,7 +864,7 @@ public class CappedLogFileSessionSelectorTest {
     void testSeededCountClampYieldsToConfiguredMinimumAboveCeiling() {
         // A configured minimum above the growth ceiling wins on the seed path just as it does on
         // the stall path: the derived count of 19 clamps to the minimum of 18, never below it
-        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(18, 16, ONE_GB, Scn.valueOf(2000));
+        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(18, 16, Scn.valueOf(2000));
         final Scn upperBounds = Scn.valueOf(5000);
 
         List<LogFile> pinnedLogs = new ArrayList<>();
@@ -877,7 +877,7 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection first = seededSelector.selectLogsForSession(
                 new LogFilesResult(pinnedLogs, singleThreadOpen()), upperBounds);
         assertThat(first.logFiles()).hasSize(20);
-        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(2100));
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(2099));
 
         // Call 2: the catch-up slice is the configured minimum of 18 logs, not the ceiling
         List<LogFile> catchUpLogs = new ArrayList<>();
@@ -892,7 +892,7 @@ public class CappedLogFileSessionSelectorTest {
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .startsWith("arc21.log")
                 .endsWith("arc38.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(3900));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(3899));
     }
 
     @Test
@@ -901,7 +901,7 @@ public class CappedLogFileSessionSelectorTest {
         // The growth ceiling is configuration, not a constant: with a ceiling of 4, a seeded
         // width of 6 clamps to 4, the extension still carries the first window past the
         // boundary, and the catch-up slice after the pin clears honors the configured value
-        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 4, ONE_GB, Scn.valueOf(700));
+        CappedLogFileSessionSelector seededSelector = new CappedLogFileSessionSelector(1, 4, Scn.valueOf(700));
         final Scn upperBounds = Scn.valueOf(5000);
 
         List<LogFile> pinnedLogs = new ArrayList<>();
@@ -915,7 +915,7 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection first = seededSelector.selectLogsForSession(
                 new LogFilesResult(pinnedLogs, singleThreadOpen()), upperBounds);
         assertThat(first.logFiles()).hasSize(7);
-        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(800));
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(799));
 
         // Call 2: the pin cleared within the first window; the catch-up slice is 4 logs
         List<LogFile> catchUpLogs = new ArrayList<>();
@@ -930,7 +930,7 @@ public class CappedLogFileSessionSelectorTest {
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .startsWith("arc8.log")
                 .endsWith("arc11.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(1200));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(1199));
     }
 
     @Test
@@ -955,7 +955,7 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection second = selector.selectLogsForSession(result, UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(400));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(399));
         assertThat(interceptor.containsMessage("growing log count per redo thread to 3")).isTrue();
     }
 
@@ -967,7 +967,7 @@ public class CappedLogFileSessionSelectorTest {
         // per session toward it
         final LogInterceptor interceptor = new LogInterceptor(CappedLogFileSessionSelector.class);
         interceptor.setLoggerLevel(CappedLogFileSessionSelector.class, Level.DEBUG);
-        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
 
         // Call 1: online pass mining up to 500; boundary 500 recorded, growth baseline cleared
         List<LogFile> onlineLogs = List.of(
@@ -989,14 +989,14 @@ public class CappedLogFileSessionSelectorTest {
         SessionLogSelection second = pinnedSelector.selectLogsForSession(backlogResult, UPPER_BOUNDS);
         assertThat(second.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log", "arc4.log", "arc5.log");
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(600));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(599));
 
-        // Call 3: stall; 5 GB lie below the mined boundary of 600 => budget jumps 1 -> 5 in one
+        // Call 3: stall; 5 GB lie below the mined boundary of 599 => budget jumps 1 -> 5 in one
         // step (linear growth would have logged 2)
         SessionLogSelection third = pinnedSelector.selectLogsForSession(backlogResult, UPPER_BOUNDS);
         assertThat(third.logFiles()).extracting(LogFile::getFileName)
                 .containsExactly("arc1.log", "arc2.log", "arc3.log", "arc4.log", "arc5.log", "arc6.log");
-        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(700));
+        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(699));
         assertThat(interceptor.containsMessage("growing log count per redo thread to 5")).isTrue();
         assertThat(interceptor.containsMessage("growing log count per redo thread to 2")).isFalse();
     }
@@ -1008,7 +1008,7 @@ public class CappedLogFileSessionSelectorTest {
         // the query timeout; while clamped, the boundary still advances via the extension
         final LogInterceptor interceptor = new LogInterceptor(CappedLogFileSessionSelector.class);
         interceptor.setLoggerLevel(CappedLogFileSessionSelector.class, Level.DEBUG);
-        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
         final Scn upperBounds = Scn.valueOf(5000);
 
         // Call 1: online pass mining up to 1850
@@ -1028,14 +1028,14 @@ public class CappedLogFileSessionSelectorTest {
 
         SessionLogSelection second = pinnedSelector.selectLogsForSession(backlogResult, upperBounds);
         assertThat(second.logFiles()).hasSize(18);
-        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(1900));
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(1899));
 
         // Call 3: stall; 18 GB lie below the mined boundary but the derived count clamps at the
         // growth ceiling;
         // the budget covers arc1..arc16 and the extension adds arc17..arc19
         SessionLogSelection third = pinnedSelector.selectLogsForSession(backlogResult, upperBounds);
         assertThat(third.logFiles()).hasSize(19);
-        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(2000));
+        assertThat(third.effectiveUpperBounds()).isEqualTo(Scn.valueOf(1999));
         assertThat(interceptor.containsMessage("growing log count per redo thread to 16")).isTrue();
         assertThat(interceptor.containsMessage("growing log count per redo thread to 17")).isFalse();
         assertThat(interceptor.containsMessage("growing log count per redo thread to 18")).isFalse();
@@ -1043,7 +1043,7 @@ public class CappedLogFileSessionSelectorTest {
         // Call 4: still stalled; the budget holds at the ceiling yet the boundary advances
         SessionLogSelection fourth = pinnedSelector.selectLogsForSession(backlogResult, upperBounds);
         assertThat(fourth.logFiles()).hasSize(20);
-        assertThat(fourth.effectiveUpperBounds()).isEqualTo(Scn.valueOf(2100));
+        assertThat(fourth.effectiveUpperBounds()).isEqualTo(Scn.valueOf(2099));
         assertThat(interceptor.containsMessage("growing log count per redo thread to 17")).isFalse();
     }
 
@@ -1054,7 +1054,7 @@ public class CappedLogFileSessionSelectorTest {
         // online redo, the count resets to the minimum and the growth baseline clears
         final LogInterceptor interceptor = new LogInterceptor(CappedLogFileSessionSelector.class);
         interceptor.setLoggerLevel(CappedLogFileSessionSelector.class, Level.DEBUG);
-        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, ONE_GB, Scn.NULL);
+        CappedLogFileSessionSelector pinnedSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
 
         // Call 1: online pass mining up to 500
         List<LogFile> onlineLogs = List.of(
@@ -1081,6 +1081,232 @@ public class CappedLogFileSessionSelectorTest {
         assertThat(fourth.logFiles()).containsExactlyInAnyOrderElementsOf(backlogLogs);
         assertThat(fourth.effectiveUpperBounds()).isEqualTo(UPPER_BOUNDS);
         assertThat(interceptor.containsMessage("resetting log count per redo thread to 1")).isTrue();
+    }
+
+    @Test
+    @FixFor("dbz#2668")
+    void testArchiveOnlyStreamResetsGrowthOnceTheWindowHoldsEveryCollectedLog() {
+        // A physical standby mines archives only, so no window ever ends on the current online redo
+        // and the online reset is unreachable. Without a second signal the log count ratchets to the
+        // growth ceiling and stays there for the life of the connector.
+        final LogInterceptor interceptor = new LogInterceptor(CappedLogFileSessionSelector.class);
+        interceptor.setLoggerLevel(CappedLogFileSessionSelector.class, Level.DEBUG);
+
+        final Scn upperBounds = Scn.valueOf(50000);
+        CappedLogFileSessionSelector archiveSelector = new CappedLogFileSessionSelector(2, 4, Scn.NULL);
+        List<LogFile> backlog = new ArrayList<>();
+        for (int i = 1; i <= 24; i++) {
+            backlog.add(createArchiveLog("arc" + i + ".log", 100L * i, 100L * (i + 1), i, 1, ONE_GB));
+        }
+
+        // A long-running transaction pins the window, so growth climbs to the ceiling.
+        for (int pass = 1; pass <= 5; pass++) {
+            archiveSelector.selectLogsForSession(new LogFilesResult(backlog, singleThreadOpen()), upperBounds);
+        }
+        assertThat(interceptor.containsMessage("growing log count per redo thread to 4")).isTrue();
+        assertThat(interceptor.containsMessage("resetting log count per redo thread")).isFalse();
+
+        // The pin clears and the window drains the backlog. Nothing here ends on an online redo log,
+        // so only the window holding every remaining archive can signal that mining has caught up.
+        Scn windowBottom = Scn.valueOf(99);
+        for (int pass = 1; pass <= 10; pass++) {
+            final Scn lower = windowBottom;
+            List<LogFile> remaining = backlog.stream()
+                    .filter(logFile -> logFile.getLastScn().compareTo(lower) > 0)
+                    .toList();
+            if (remaining.isEmpty()) {
+                break;
+            }
+
+            SessionLogSelection result = archiveSelector.selectLogsForSession(
+                    new LogFilesResult(remaining, singleThreadOpen()), upperBounds);
+
+            // The boundary stays tightened to the last archive and never reaches the unbounded
+            // upper bound, which would advance the offset past redo that was never mined.
+            assertThat(result.effectiveUpperBounds()).isLessThan(upperBounds);
+            assertThat(result.effectiveUpperBounds()).isGreaterThan(windowBottom);
+            windowBottom = result.effectiveUpperBounds();
+        }
+
+        assertThat(interceptor.containsMessage("All collected logs are within the window, resetting log count per redo thread to 2")).isTrue();
+    }
+
+    @Test
+    @FixFor("dbz#2678")
+    void testConfiguredMinimumIsHonouredWhenASingleLogSatisfiesTheBudget() {
+        // The budget is 2 logs * 1 GB, but each archive is larger than the whole budget, as happens
+        // when the redo log size the window was sized from under-reports the logs actually mined.
+        // The byte threshold is met by the first log alone, yet the configured minimum still applies.
+        List<LogFile> logs = List.of(
+                createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB * 3),
+                createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB * 3),
+                createArchiveLog("arc3.log", 300, 400, 3, 1, ONE_GB * 3));
+
+        SessionLogSelection result = selector.selectLogsForSession(
+                new LogFilesResult(logs, singleThreadOpen()), UPPER_BOUNDS);
+
+        assertThat(result.logFiles()).containsExactly(logs.get(0), logs.get(1));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
+    }
+
+    @Test
+    @FixFor("dbz#2678")
+    void testConfiguredMinimumIsHonouredForEveryRedoThread() {
+        // The floor applies per redo thread, not across the selection as a whole.
+        List<LogFile> logs = List.of(
+                createArchiveLog("t1_arc1.log", 100, 200, 1, 1, ONE_GB * 3),
+                createArchiveLog("t1_arc2.log", 200, 300, 2, 1, ONE_GB * 3),
+                createArchiveLog("t1_arc3.log", 300, 400, 3, 1, ONE_GB * 3),
+                createArchiveLog("t2_arc1.log", 100, 200, 1, 2, ONE_GB * 3),
+                createArchiveLog("t2_arc2.log", 200, 300, 2, 2, ONE_GB * 3),
+                createArchiveLog("t2_arc3.log", 300, 400, 3, 2, ONE_GB * 3));
+
+        SessionLogSelection result = selector.selectLogsForSession(
+                new LogFilesResult(logs, twoThreadsOpen()), UPPER_BOUNDS);
+
+        assertThat(result.logFiles()).extracting(LogFile::getFileName)
+                .containsExactly("t1_arc1.log", "t1_arc2.log", "t2_arc1.log", "t2_arc2.log");
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
+    }
+
+    @Test
+    @FixFor("dbz#2678")
+    void testBudgetUnitFollowsCollectedLogSizesRatherThanAFixedRedoSize() {
+        // Every log is an eighth of the size a V$LOG read would have reported. The unit is taken
+        // from the logs themselves, so a 2 log budget still admits exactly 2 logs rather than
+        // collapsing to the floor the way a unit eight times too large would.
+        List<LogFile> logs = List.of(
+                createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB / 8),
+                createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB / 8),
+                createArchiveLog("arc3.log", 300, 400, 3, 1, ONE_GB / 8),
+                createArchiveLog("arc4.log", 400, 500, 4, 1, ONE_GB / 8));
+
+        SessionLogSelection result = selector.selectLogsForSession(
+                new LogFilesResult(logs, singleThreadOpen()), UPPER_BOUNDS);
+
+        assertThat(result.logFiles()).containsExactly(logs.get(0), logs.get(1));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
+    }
+
+    @Test
+    @FixFor("dbz#2678")
+    void testForcedLogSwitchesAreSweptIntoOnePassAlongsideAFullLog() {
+        // Three forced switches archive small logs ahead of full ones. The unit is the largest
+        // collected log, so the budget is measured in redo volume and sweeps the small logs up
+        // instead of spending a mining session on each.
+        List<LogFile> logs = List.of(
+                createArchiveLog("arc1.log", 100, 200, 1, 1, ONE_GB / 64),
+                createArchiveLog("arc2.log", 200, 300, 2, 1, ONE_GB / 64),
+                createArchiveLog("arc3.log", 300, 400, 3, 1, ONE_GB / 64),
+                createArchiveLog("arc4.log", 400, 500, 4, 1, ONE_GB),
+                createArchiveLog("arc5.log", 500, 600, 5, 1, ONE_GB),
+                createArchiveLog("arc6.log", 600, 700, 6, 1, ONE_GB));
+
+        SessionLogSelection result = selector.selectLogsForSession(
+                new LogFilesResult(logs, singleThreadOpen()), UPPER_BOUNDS);
+
+        assertThat(result.logFiles()).containsExactly(logs.get(0), logs.get(1), logs.get(2), logs.get(3), logs.get(4));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(599));
+    }
+
+    @Test
+    @FixFor("dbz#2678")
+    void testConfiguredMinimumIsHonouredWhenNoLogReportsASize() {
+        // Without any size to resolve a unit from, the byte budget is zero and the configured
+        // minimum is the only width the selection can promise.
+        List<LogFile> logs = List.of(
+                createArchiveLog("arc1.log", 100, 200, 1, 1, 0),
+                createArchiveLog("arc2.log", 200, 300, 2, 1, 0),
+                createArchiveLog("arc3.log", 300, 400, 3, 1, 0));
+
+        SessionLogSelection result = selector.selectLogsForSession(
+                new LogFilesResult(logs, singleThreadOpen()), UPPER_BOUNDS);
+
+        assertThat(result.logFiles()).containsExactly(logs.get(0), logs.get(1));
+        assertThat(result.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
+    }
+
+    @Test
+    @FixFor("dbz#2678")
+    void testWindowAdvancesContiguouslyWhenBudgetUnitCollapsesMidBacklog() {
+        // Six full logs ahead of ten forced-switch logs. Once the full logs are behind the window
+        // the resolved unit collapses by 64x. The budget is re-expressed in the smaller unit, so
+        // the byte width shrinks, but the configured log count and contiguous coverage both hold
+        // across the change.
+        List<LogFile> backlog = new ArrayList<>();
+        for (int i = 1; i <= 6; i++) {
+            backlog.add(createArchiveLog("arc" + i + ".log", 100L * i, 100L * (i + 1), i, 1, ONE_GB));
+        }
+        for (int i = 7; i <= 16; i++) {
+            backlog.add(createArchiveLog("arc" + i + ".log", 100L * i, 100L * (i + 1), i, 1, ONE_GB / 64));
+        }
+
+        // Far enough ahead of the backlog that the upper bound never clamps the window.
+        final Scn upperBounds = Scn.valueOf(5000);
+        CappedLogFileSessionSelector backlogSelector = new CappedLogFileSessionSelector(2, 4, Scn.NULL);
+        Scn minedBoundary = Scn.valueOf(99);
+        for (int pass = 1; pass <= 8; pass++) {
+            final Scn lower = minedBoundary;
+            List<LogFile> remaining = backlog.stream()
+                    .filter(logFile -> logFile.getLastScn().compareTo(lower) > 0)
+                    .toList();
+
+            SessionLogSelection result = backlogSelector.selectLogsForSession(
+                    new LogFilesResult(remaining, singleThreadOpen()), upperBounds);
+
+            // Every pass honours the configured minimum and resumes exactly where the last one
+            // stopped, so the collapse neither re-reads mined ground nor leaves a gap.
+            assertThat(result.logFiles()).hasSize(2);
+            assertThat(result.logFiles().get(0).getFirstScn()).isEqualTo(minedBoundary.add(Scn.ONE));
+            assertThat(result.effectiveUpperBounds()).isGreaterThan(minedBoundary);
+            minedBoundary = result.effectiveUpperBounds();
+        }
+
+        // Three passes of full logs then five of small ones covers all sixteen.
+        assertThat(minedBoundary).isEqualTo(Scn.valueOf(1699));
+    }
+
+    @Test
+    @FixFor("dbz#2862")
+    void testBoundaryStopsBelowFirstScnOfOtherThreadsOmittedNextLog() {
+        // Thread 1's capped window ends on t1_arc1, whose next SCN 300 is the first SCN of t1_arc2,
+        // which is left out of the session. Thread 2's capped window holds SCN 300 mid-log, so it can
+        // return changes at 300. Reading up to 300 would move the read position onto 300 and the
+        // next window, reading above it, would skip thread 1's changes at 300 in t1_arc2.
+        CappedLogFileSessionSelector racSelector = new CappedLogFileSessionSelector(1, 16, Scn.NULL);
+
+        List<LogFile> logs = List.of(
+                createArchiveLog("t1_arc1.log", 100, 300, 1, 1, ONE_GB),
+                createArchiveLog("t1_arc2.log", 300, 400, 2, 1, ONE_GB),
+                createRedoLog("t1_redo.log", 400, 3, 1),
+                createArchiveLog("t2_arc1.log", 150, 350, 1, 2, ONE_GB),
+                createArchiveLog("t2_arc2.log", 350, 450, 2, 2, ONE_GB),
+                createRedoLog("t2_redo.log", 450, 3, 2));
+
+        SessionLogSelection first = racSelector.selectLogsForSession(
+                new LogFilesResult(logs, twoThreadsOpen()), UPPER_BOUNDS);
+        assertThat(first.logFiles()).extracting(LogFile::getFileName)
+                .containsExactlyInAnyOrder("t1_arc1.log", "t2_arc1.log");
+        assertThat(first.effectiveUpperBounds()).isEqualTo(Scn.valueOf(299));
+
+        // No change at SCN 300 can be read before the log holding thread 1's changes at 300 is mined.
+        for (LogFile omitted : logs) {
+            if (!first.logFiles().contains(omitted)) {
+                assertThat(first.effectiveUpperBounds()).isLessThan(omitted.getFirstScn());
+            }
+        }
+
+        // The next pass reads above 299, adds t1_arc2, and so mines thread 1's changes at 300.
+        final Scn readPosition = first.effectiveUpperBounds();
+        List<LogFile> remaining = logs.stream()
+                .filter(logFile -> logFile.isCurrent() || logFile.getLastScn().compareTo(readPosition) > 0)
+                .toList();
+
+        SessionLogSelection second = racSelector.selectLogsForSession(
+                new LogFilesResult(remaining, twoThreadsOpen()), UPPER_BOUNDS);
+        assertThat(second.logFiles()).extracting(LogFile::getFileName)
+                .containsExactlyInAnyOrder("t1_arc2.log", "t2_arc1.log");
+        assertThat(second.effectiveUpperBounds()).isEqualTo(Scn.valueOf(349));
     }
 
     private static LogFile createArchiveLog(String name, long startScn, long endScn, int seq, int thread, long bytes) {

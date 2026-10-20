@@ -52,6 +52,7 @@ import io.debezium.connector.oracle.logminer.events.LobWriteEvent;
 import io.debezium.connector.oracle.logminer.events.LogMinerEvent;
 import io.debezium.connector.oracle.logminer.events.LogMinerEventRow;
 import io.debezium.connector.oracle.logminer.events.RedoSqlDmlEvent;
+import io.debezium.connector.oracle.logminer.events.RollbackToSavepointEvent;
 import io.debezium.connector.oracle.logminer.events.SelectLobLocatorEvent;
 import io.debezium.connector.oracle.logminer.events.XmlBeginEvent;
 import io.debezium.connector.oracle.logminer.events.XmlEndEvent;
@@ -85,6 +86,7 @@ import io.debezium.relational.TableId;
 import io.debezium.relational.Tables;
 import io.debezium.text.ParsingException;
 import io.debezium.util.Clock;
+import io.debezium.util.LRUCacheMap;
 import io.debezium.util.Loggings;
 import io.debezium.util.Metronome;
 import io.debezium.util.Stopwatch;
@@ -125,6 +127,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
     private final ExtendedStringParser extendedStringParser;
     private final XmlBeginParser xmlBeginParser;
     private final Tables.TableFilter tableFilter;
+    private final LRUCacheMap<Long, PrimaryObjectLookup> primaryObjectLookups;
     private final List<String> archiveDestinationNames;
     private final LogMinerColumnIndexes columnIndexes;
     private final OffsetActivityMonitorService offsetActivityMonitorService;
@@ -152,6 +155,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
                                                       LogMinerStreamingChangeEventSourceMetrics metrics) {
         this.connectorConfig = connectorConfig;
         this.connectionFactory = connectionFactory;
+        this.primaryObjectLookups = new LRUCacheMap<>(connectorConfig.getObjectIdToTableIdCacheSize());
         this.streamingConnection = connectionFactory.streamingConnectionFactory().mainConnection();
         this.dispatcher = dispatcher;
         this.errorHandler = errorHandler;
@@ -191,7 +195,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
             this.effectiveOffset = offsetContext;
             this.partition = partition;
             this.context = context;
-            this.logFileSessionSelector = resolveLogFileSessionSelector(connectorConfig, streamingConnection);
+            this.logFileSessionSelector = resolveLogFileSessionSelector(connectorConfig);
 
             // perform various pre-streaming initialization steps
             prepareJdbcConnection(false);
@@ -317,8 +321,8 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
         return OracleConnectorConfig.LogMiningStrategy.CATALOG_IN_REDO.equals(connectorConfig.getLogMiningStrategy());
     }
 
-    protected boolean isUsingHybridStrategy() {
-        return OracleConnectorConfig.LogMiningStrategy.HYBRID.equals(connectorConfig.getLogMiningStrategy());
+    protected boolean isDictionaryMismatchPossible() {
+        return connectorConfig.getLogMiningStrategy().isDictionaryMismatchPossible();
     }
 
     protected boolean isUsingCommittedDataOnly() {
@@ -454,6 +458,18 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
     }
 
     /**
+     * Checks whether a heartbeat should be emitted after a mining iteration.
+     * <p>
+     * This must be called once the iteration's offset bookkeeping is complete so that any heartbeat
+     * that is emitted carries the up-to-date offsets, even when no captured row changes were dispatched.
+     *
+     * @throws InterruptedException if the thread is interrupted
+     */
+    protected void dispatchHeartbeatEvent() throws InterruptedException {
+        getEventDispatcher().dispatchHeartbeatEvent(getPartition(), getOffsetContext());
+    }
+
+    /**
      * Execute any steps that should occur before dispatching a data change event.
      *
      * @param event the event, should not be {@code null}
@@ -530,6 +546,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
                 preProcessEvent(event);
 
                 switch (event.getEventType()) {
+                    case INTERNAL -> handleInternalEvent(event);
                     case MISSING_SCN -> handleMissingScnEvent(event);
                     case START -> handleStartEvent(event);
                     case COMMIT -> handleCommitEvent(event);
@@ -561,6 +578,10 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
      */
     protected void preProcessEvent(LogMinerEventRow event) {
         getBatchMetrics().rowProcessed();
+    }
+
+    protected void handleInternalEvent(LogMinerEventRow event) throws InterruptedException {
+        // no-op
     }
 
     /**
@@ -638,7 +659,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
      * @throws InterruptedException if the thread is interrupted
      */
     protected void handleDataChangeEvent(LogMinerEventRow event) throws SQLException, InterruptedException {
-        if (Strings.isNullOrBlank(event.getRedoSql())) {
+        if (!event.isRollbackFlag() && Strings.isNullOrBlank(event.getRedoSql())) {
             LOGGER.trace("Data event in transaction {} with SCN {} has empty redo SQL: {}",
                     event.getTransactionId(), event.getScn(), Loggings.maybeRedactSensitiveData(event));
             return;
@@ -651,7 +672,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
         // be backward compatible, only trigger this behavior if there is an error reason when
         // STATUS=2 in the INFO column.
         if (event.hasErrorStatus() && !Strings.isNullOrBlank(event.getInfo())) {
-            if (!isUsingHybridStrategy() || (isUsingHybridStrategy() && !isTableKnown(event.getTableId()))) {
+            if (!isDictionaryMismatchPossible() || !isTableKnown(event.getTableId())) {
                 // Fail-fast: The SQL_REDO column is not valid and cannot be parsed
                 notifyEventProcessingFailure(event, null);
                 return;
@@ -674,7 +695,12 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
         final Table table = getTableForDataEvent(event);
         if (table != null) {
             if (isDispatchAllowedForDataChangeEvent(event)) {
-                dispatchDataChangeEventInternal(event, table);
+                if (event.isRollbackFlag()) {
+                    enqueueEvent(event, new RollbackToSavepointEvent(event));
+                }
+                else {
+                    dispatchDataChangeEventInternal(event, table);
+                }
             }
         }
     }
@@ -1315,7 +1341,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
                         getMetrics(),
                         () -> handleTruncateEvent(event)));
 
-        if (isUsingHybridStrategy()) {
+        if (isDictionaryMismatchPossible()) {
             // Remove table from the column-based parser cache
             // It will be refreshed on the next DML event that requires special parsing
             reconstructColumnDmlParser.removeTableFromCache(tableId);
@@ -1425,11 +1451,12 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
      * when a redo entry's object identifier matches but its version does not match the version
      * in the Oracle data dictionary.
      *
-     * @param tableId table identifier, should not be {@code null}
+     * @param tableId table identifier, can be {@code null} when the row carries no table name
      * @return true if the table is unknown, false otherwise
      */
     protected boolean isTableKnown(TableId tableId) {
-        return !tableId.table().equalsIgnoreCase("UNKNOWN");
+        // A row that carries no table name cannot be resolved any more than an UNKNOWN one can.
+        return tableId != null && !tableId.table().equalsIgnoreCase("UNKNOWN");
     }
 
     /**
@@ -1444,7 +1471,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
         try {
             try {
                 final LogMinerDmlParser parser;
-                if (event.hasErrorStatus() && !Strings.isNullOrBlank(event.getInfo()) && isUsingHybridStrategy()) {
+                if (event.hasErrorStatus() && !Strings.isNullOrBlank(event.getInfo()) && isDictionaryMismatchPossible()) {
                     parser = reconstructColumnDmlParser;
                 }
                 else {
@@ -1532,6 +1559,31 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
     }
 
     /**
+     * Handle an event whose object cannot be resolved to a table, which leaves the connector unable to
+     * decide whether the event belongs to a captured table, let alone emit it.
+     *
+     * @param event the event, should not be {@code null}
+     */
+    protected void notifyUnresolvableObjectFailure(LogMinerEventRow event) {
+        final String message = String.format(
+                "Failed to resolve a table for object id %s in the %s event with SCN %s. Neither LogMiner's data "
+                        + "dictionary nor the connector's relational model describe this object, which happens when the "
+                        + "table was dropped and purged, or when the data dictionary predates a schema change.",
+                event.getObjectId(),
+                event.getEventType(),
+                event.getScn());
+
+        switch (getConfig().getEventProcessingFailureHandlingMode()) {
+            case FAIL -> {
+                Loggings.logErrorAndTraceRecord(LOGGER, event, message);
+                throw new DebeziumException(message);
+            }
+            case WARN -> Loggings.logWarningAndTraceRecord(LOGGER, event, message + " This event will be ignored and skipped.");
+            default -> Loggings.logDebugAndTraceRecord(LOGGER, event, message + " This event will be ignored and skipped.");
+        }
+    }
+
+    /**
      * Resolve the relational table for a DML data event.
      *
      * @param event the event, should not be {@code null}
@@ -1562,7 +1614,7 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
      */
     protected TableId getTableIdForDataEvent(LogMinerEventRow event) throws SQLException {
         final TableId tableId = event.getTableId();
-        if (tableId != null && isUsingHybridStrategy()) {
+        if (tableId != null && isDictionaryMismatchPossible()) {
             if (tableId.table().startsWith("BIN$")) {
                 // Object was dropped but has not been purged.
                 try (OracleConnection connection = new OracleConnection(getConfig(), true)) {
@@ -1577,12 +1629,13 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
                 }
             }
             else if (!isTableKnown(tableId)) {
-                // Object has been dropped and purged.
+                // Object has been dropped and purged, or the data dictionary predates a schema change.
                 final TableId resolvedTableId = getSchema().getTableIdByObjectId(event.getObjectId(), event.getDataObjectId());
                 if (resolvedTableId != null) {
                     return resolvedTableId;
                 }
-                throw new DebeziumException("Failed to resolve UNKNOWN table name by object id lookup");
+                notifyUnresolvableObjectFailure(event);
+                return null;
             }
         }
         return tableId;
@@ -1595,19 +1648,76 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
      * @return true if the event should be skipped, false otherwise
      */
     protected boolean isNonIncludedTableSkipped(LogMinerEventRow event) {
-        if (isUsingHybridStrategy()) {
+        if (isDictionaryMismatchPossible()) {
             if (isTableLookupByObjectIdRequired(event)) {
-                // Special use case where the table has been dropped and purged, and we are processing an
-                // old event for the table that comes prior to the drop.
-                LOGGER.trace("Found DML for dropped table in history with object-id based table name {}.", event.getTableId().table());
-                final TableId tableId = getSchema().getTableIdByObjectId(event.getObjectId(), null);
-                if (tableId != null) {
-                    event.setTableId(tableId);
+                // Special use case where the table has been dropped and purged, or where the dictionary used
+                // for mining predates a schema change, and we are processing an event for that table.
+                LOGGER.trace("Found DML for a table that requires an object-id lookup {}.", event.getTableId());
+
+                TableId tableId = getSchema().getTableIdByObjectId(event.getObjectId(), null);
+                if (tableId == null && CaptureMode.PHYSICAL_STANDBY.equals(connectorConfig.getCaptureMode())) {
+                    tableId = getTableIdByObjectIdFromPrimary(event);
                 }
+
+                if (tableId == null) {
+                    // The object cannot be named, so the filters cannot decide whether it is captured.
+                    // Rather than drop the event silently, defer to the event processing failure mode.
+                    notifyUnresolvableObjectFailure(event);
+                    return true;
+                }
+                event.setTableId(tableId);
                 return !tableFilter.isIncluded(event.getTableId());
             }
         }
         return true;
+    }
+
+    /**
+     * Resolves the table identifier for an object that neither the mining dictionary nor the connector's
+     * relational model can name by consulting the primary database's catalog.
+     * <p>
+     * When streaming from a physical standby, the dictionary file can lag behind the redo being mined, so
+     * events for tables unknown to the dictionary arrive with object-id based names. The primary's catalog
+     * is the only remaining source that can name such an object, which the filters need in order to decide
+     * whether the event belongs to a captured table.
+     * <p>
+     * Answers are cached for the lifetime of the streaming session, including the absence of an answer, so
+     * that a busy non-captured table does not cost one round trip to the primary per change. The cache is
+     * keyed on the object id and validated against the data object id, so a {@code TRUNCATE} or a table
+     * move invalidates an entry. A rename keeps both ids and therefore goes unnoticed until the dictionary
+     * file is rebuilt, at which point LogMiner names the table again and this lookup is no longer consulted.
+     *
+     * @param event the event, should not be {@code null}
+     * @return the resolved table identifier carrying the event's catalog, or {@code null} if the object is unknown
+     */
+    private TableId getTableIdByObjectIdFromPrimary(LogMinerEventRow event) {
+        final PrimaryObjectLookup cached = primaryObjectLookups.get(event.getObjectId());
+        if (cached != null && cached.dataObjectId() == event.getDataObjectId()) {
+            return cached.tableId();
+        }
+
+        LOGGER.debug("Querying primary for object={} and data object={}", event.getObjectId(), event.getDataObjectId());
+        final OracleConnection primary = connectionFactory.mainConnection();
+        if (isUsingPluggableDatabase()) {
+            primary.setSessionToPdb(connectorConfig.getPdbName());
+        }
+        try {
+            final TableId tableId = primary.getTableIdByObjectId(event.getTableId().catalog(), event.getObjectId(), event.getDataObjectId());
+            primaryObjectLookups.put(event.getObjectId(), new PrimaryObjectLookup(event.getDataObjectId(), tableId));
+            return tableId;
+        }
+        finally {
+            if (isUsingPluggableDatabase()) {
+                primary.resetSessionToCdb();
+            }
+        }
+    }
+
+    /**
+     * A cached answer from the primary's catalog for an object id; a {@code null} table id records that
+     * the primary could not name the object either.
+     */
+    private record PrimaryObjectLookup(long dataObjectId, TableId tableId) {
     }
 
     /**
@@ -2040,6 +2150,8 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
                 LOGGER.warn("SCN {} is not yet in archive logs, waiting for log switch.", scn);
                 showMessage = false;
             }
+            // No batch is being processed while waiting, so pending synchronous signals can safely run here
+            dispatcher.processSynchronousSignals();
             Metronome.sleeper(connectorConfig.getArchiveLogOnlyScnPollTime(), getClock()).pause();
         }
 
@@ -2129,11 +2241,11 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
     }
 
     private Scn getMinNextScnAcrossAllThreadMaxNextScnValues() {
-        return getCurrentLogFiles().stream()
+        return getSessionLogFiles().stream()
                 .filter(LogFile::isArchive)
                 .collect(Collectors.groupingBy(
                         LogFile::getThread,
-                        Collectors.mapping(LogFile::getNextScn, Collectors.maxBy(Scn::compareTo))))
+                        Collectors.mapping(LogFile::getLastScn, Collectors.maxBy(Scn::compareTo))))
                 .values()
                 .stream()
                 .flatMap(Optional::stream)
@@ -2141,12 +2253,11 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
                 .orElseThrow(() -> new DebeziumException("Failed to resolve archive logs upper bounds"));
     }
 
-    private LogFileSessionSelector resolveLogFileSessionSelector(OracleConnectorConfig connectorConfig, OracleConnection connection) throws SQLException {
+    private LogFileSessionSelector resolveLogFileSessionSelector(OracleConnectorConfig connectorConfig) {
         final int minimumLogCountPerThread = connectorConfig.getLogMiningMinimumLogCount();
         if (minimumLogCountPerThread > 0) {
             switch (connectorConfig.getLogMiningStrategy()) {
-                case HYBRID, ONLINE_CATALOG: {
-                    final long maximumRedoLogFileSize = connection.getMaximumRedoLogFileSize();
+                case HYBRID, ONLINE_CATALOG, DICTIONARY_FROM_FILE: {
                     // The maximum committed SCN across redo threads is a lower bound on the upper
                     // boundary of the last mining session before a restart; seeding it restores the
                     // capped window sizing that would otherwise collapse to the minimum log count.
@@ -2155,7 +2266,6 @@ public abstract class AbstractLogMinerStreamingChangeEventSource
                     return new CappedLogFileSessionSelector(
                             minimumLogCountPerThread,
                             connectorConfig.getLogMiningLogCountGrowthMax(),
-                            maximumRedoLogFileSize,
                             minedBoundary);
                 }
             }

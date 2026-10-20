@@ -43,8 +43,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-cassandra
         with:
           path-core: core
@@ -78,8 +77,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-db2
         with:
           path-core: core
@@ -113,8 +111,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-ibmi
         with:
           path-core: core
@@ -148,8 +145,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-ingres
         with:
           path-core: core
@@ -183,8 +179,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-informix
         with:
           path-core: core
@@ -218,8 +213,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-vitess
         with:
           path-core: core
@@ -253,8 +247,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-spanner
         with:
           path-core: core
@@ -288,8 +281,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-cockroachdb
         with:
           path-core: core
@@ -320,14 +312,20 @@ jobs:
           repository: debezium/debezium-server
           path: server
           ref: main
+      - name: Checkout Action (Debezium Quarkus)
+        uses: actions/checkout@v7
+        with:
+          repository: debezium/debezium-quarkus
+          path: quarkus
+          ref: main
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - uses: ./core/.github/actions/build-debezium-server
         with:
           path-core: core
+          path-quarkus: quarkus
           path-server: server
           only-build: 'true'
       - name: Upload build artifacts
@@ -353,8 +351,7 @@ jobs:
       - uses: ./core/.github/actions/setup-java
       - uses: ./core/.github/actions/maven-cache
         with:
-          key: maven-debezium-test-build-${{ hashFiles('core/**/pom.xml') }}
-          save: 'false'
+          key: maven-debezium-test-push-build-${{ hashFiles('core/**/pom.xml') }}
       - name: Build Debezium (Core)
         shell: bash
         run: >
@@ -387,8 +384,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-storage
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -409,8 +405,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-openlineage
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -431,8 +426,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-ai
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -453,8 +447,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-schema-generator
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -475,8 +468,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-testing
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -497,8 +489,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-mysql
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -519,8 +510,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-postgres
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -541,8 +531,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-oracle
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -563,8 +552,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-sqlserver
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -585,8 +573,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-mongodb
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -607,8 +594,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-mariadb
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:
@@ -629,8 +615,7 @@ jobs:
       - uses: ./.github/actions/build-debezium-jdbc
         with:
           only-build: 'true'
-          maven-cache-key: maven-debezium-test-build-${{ hashFiles('**/pom.xml') }}
-          maven-cache-save: 'false'
+          maven-cache-key: maven-debezium-test-push-build-${{ hashFiles('**/pom.xml') }}
       - name: Upload build artifacts
         uses: actions/upload-artifact@v7
         with:

@@ -24,6 +24,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Queue;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletionService;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +34,7 @@ import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -157,7 +159,7 @@ public abstract class RelationalSnapshotChangeEventSource<P extends Partition, O
 
             // Note that there's a minor race condition here: a new table matching the filters could be created between
             // this call and the determination of the initial snapshot position below; this seems acceptable, though
-            determineCapturedTables(ctx, dataCollectionsToBeSnapshotted, snapshottingTask);
+            determineCapturedTables(ctx, previousOffset, dataCollectionsToBeSnapshotted, snapshottingTask);
             snapshotProgressListener.monitoredDataCollectionsDetermined(snapshotContext.partition, ctx.capturedTables);
             // Init jdbc connection pool for reading table schema and data
             connectionPool = createConnectionPool(ctx);
@@ -377,7 +379,8 @@ public abstract class RelationalSnapshotChangeEventSource<P extends Partition, O
                 .collect(Collectors.toCollection(LinkedHashSet::new));
     }
 
-    private void determineCapturedTables(RelationalSnapshotContext<P, O> ctx, Set<Pattern> dataCollectionsToBeSnapshotted, SnapshottingTask snapshottingTask)
+    private void determineCapturedTables(RelationalSnapshotContext<P, O> ctx, O previousOffset, Set<Pattern> dataCollectionsToBeSnapshotted,
+                                         SnapshottingTask snapshottingTask)
             throws Exception {
 
         Set<TableId> allTableIds = getAllTableIds(ctx);
@@ -402,6 +405,8 @@ public abstract class RelationalSnapshotChangeEventSource<P extends Partition, O
                 LOGGER.trace("Ignoring table {} for data snapshotting as it's not included in the filter configuration", tableId);
             }
         }
+
+        notificationService.initialSnapshotNotificationService().notifyDataCollectionsResolved(ctx.partition, previousOffset, new TreeSet<>(capturedTables));
 
         ctx.capturedTables = addSignalingCollectionAndSort(capturedTables);
         ctx.capturedSchemaTables = snapshottingTask.isOnDemand() ? ctx.capturedTables
@@ -766,7 +771,7 @@ public abstract class RelationalSnapshotChangeEventSource<P extends Partition, O
     protected List<Column> getKeyColumnsForChunking(Table table) {
         final Key.KeyMapper keyMapper = connectorConfig.getKeyMapper();
         if (keyMapper != null) {
-            final List<Column> customKeys = keyMapper.getKeyKolumns(table);
+            final List<Column> customKeys = keyMapper.getKeyColumns(table);
             if (!customKeys.isEmpty()) {
                 return customKeys;
             }
@@ -1126,10 +1131,11 @@ public abstract class RelationalSnapshotChangeEventSource<P extends Partition, O
 
     protected Long rowCountForTableChunked(TableId tableId) throws SQLException {
         // todo: snapshot select overrides?
-        // Use the quoted, fully-qualified identifier (as the rest of the snapshot SQL does) so that
-        // schema/table names requiring quoting - special characters, reserved words, etc. - remain valid.
+        // The statement is built by the connection so that each dialect can adapt it; the default uses the
+        // quoted, fully-qualified identifier (as the rest of the snapshot SQL does) so that schema/table names
+        // requiring quoting - special characters, reserved words, etc. - remain valid.
         return jdbcConnection.queryAndMap(
-                "SELECT COUNT(1) FROM %s".formatted(jdbcConnection.quotedTableIdString(tableId)),
+                jdbcConnection.buildSelectRowCount(tableId),
                 rs -> rs.next() ? rs.getLong(1) : 0L);
     }
 
@@ -1189,29 +1195,37 @@ public abstract class RelationalSnapshotChangeEventSource<P extends Partition, O
 
     /**
      * Prepares a list of columns to be used in the snapshot select.
-     * The selected columns are based on the column include/exclude filters and if all columns are excluded,
-     * the list will contain all the primary key columns.
+     * The selected columns are based on the column include/exclude filters, plus the key columns, as the
+     * record key is built from them even when the filters exclude them from the value. If the filters
+     * exclude all columns, the list contains all columns.
      *
      * @return list of snapshot select columns
      */
     protected List<String> getPreparedColumnNames(P partition, Table table) {
-        List<String> columnNames = table.retrieveColumnNames()
-                .stream()
-                .filter(columnName -> additionalColumnFilter(partition, table.id(), columnName))
-                .filter(columnName -> connectorConfig.getColumnFilter().matches(table.id().catalog(), table.id().schema(), table.id().table(), columnName))
-                .map(jdbcConnection::quoteIdentifier)
-                .collect(Collectors.toList());
+        final Predicate<String> isIncluded = columnName -> additionalColumnFilter(partition, table.id(), columnName)
+                && connectorConfig.getColumnFilter().matches(table.id().catalog(), table.id().schema(), table.id().table(), columnName);
 
-        if (columnNames.isEmpty()) {
+        if (table.retrieveColumnNames().stream().noneMatch(isIncluded)) {
             LOGGER.info("\t All columns in table {} were excluded due to include/exclude lists, defaulting to selecting all columns", table.id());
 
-            columnNames = table.retrieveColumnNames()
+            return table.retrieveColumnNames()
                     .stream()
                     .map(jdbcConnection::quoteIdentifier)
                     .collect(Collectors.toList());
         }
 
-        return columnNames;
+        final Key.KeyMapper keyMapper = connectorConfig.getKeyMapper() != null
+                ? connectorConfig.getKeyMapper()
+                : Table::primaryKeyColumns;
+        final Set<String> keyColumnNames = keyMapper.getKeyColumns(table).stream()
+                .map(Column::name)
+                .collect(Collectors.toSet());
+        return table.retrieveColumnNames()
+                .stream()
+                .filter(columnName -> isIncluded.test(columnName)
+                        || (keyColumnNames.contains(columnName) && additionalColumnFilter(partition, table.id(), columnName)))
+                .map(jdbcConnection::quoteIdentifier)
+                .collect(Collectors.toList());
     }
 
     /**

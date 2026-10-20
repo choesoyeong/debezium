@@ -9,6 +9,7 @@ import static io.debezium.transforms.ExtractNewRecordStateConfigDefinition.CONFI
 import static io.debezium.transforms.ExtractNewRecordStateConfigDefinition.DELETED_FIELD;
 import static org.apache.kafka.connect.transforms.util.Requirements.requireStruct;
 
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -26,6 +27,7 @@ import org.apache.kafka.connect.transforms.ExtractField;
 import org.apache.kafka.connect.transforms.Flatten;
 import org.bson.BsonBoolean;
 import org.bson.BsonDocument;
+import org.bson.BsonNull;
 import org.bson.BsonType;
 import org.bson.BsonValue;
 import org.slf4j.Logger;
@@ -104,6 +106,41 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
         }
     }
 
+    public enum BsonTimestampHandlingMode implements EnumeratedValue {
+        CONNECT("connect"),
+        STRUCT("struct");
+
+        private final String value;
+
+        BsonTimestampHandlingMode(String value) {
+            this.value = value;
+        }
+
+        @Override
+        public String getValue() {
+            return value;
+        }
+
+        /**
+         * Determine if the supplied value is one of the predefined options.
+         *
+         * @param value the configuration property value; may not be null
+         * @return the matching option, or null if no match is found
+         */
+        public static BsonTimestampHandlingMode parse(String value) {
+            if (value == null) {
+                return null;
+            }
+            value = value.trim();
+            for (BsonTimestampHandlingMode option : BsonTimestampHandlingMode.values()) {
+                if (option.getValue().equalsIgnoreCase(value)) {
+                    return option;
+                }
+            }
+            return null;
+        }
+    }
+
     private static final Logger LOGGER = LoggerFactory.getLogger(ExtractNewDocumentState.class);
 
     private static final Field ARRAY_ENCODING = Field.create("array.encoding")
@@ -114,6 +151,15 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
             .withDescription("The arrays can be encoded using 'array' schema type (the default) or as a 'document' (similar to how BSON encodes arrays). "
                     + "'array' is easier to consume but requires all elements in the array to be of the same type. "
                     + "Use 'document' if the arrays in data source mix different types together.");
+
+    private static final Field BSON_TIMESTAMP_HANDLING_MODE = Field.create("bson.timestamp.handling.mode")
+            .withDisplayName("BSON timestamp handling mode")
+            .withEnum(BsonTimestampHandlingMode.class, BsonTimestampHandlingMode.CONNECT)
+            .withWidth(ConfigDef.Width.SHORT)
+            .withImportance(ConfigDef.Importance.LOW)
+            .withDescription("How BSON Timestamp values are represented. 'connect' (the default) converts the value to a Kafka Connect Timestamp, "
+                    + "discarding the BSON increment component. 'struct' emits a struct with 'time' and 'increment' fields, "
+                    + "preserving both components of the BSON value.");
 
     private static final Field FLATTEN_STRUCT = Field.create("flatten.struct")
             .withDisplayName("Flatten struct")
@@ -140,16 +186,17 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
             .withImportance(ConfigDef.Importance.LOW)
             .withDefault(false)
             .withDescription(
-                    "When set to true and \"delete.tombstone.handling.mode\" is rewrite, extracts the \"id\" from the deleted record's key and includes it as \"_id\" in the event payload.");
+                    "When set to true and \"delete.tombstone.handling.mode\" is rewrite, reads the \"_id\" of the deleted document from the record key and adds it to the event payload.");
 
     private ExtractField<R> keyExtractor;
+    private ExtractField<R> documentKeyExtractor;
     private Flatten<R> recordFlattener;
     private MongoDataConverter converter;
     private boolean flattenStruct;
     private String delimiter;
     private boolean rewriteTombstoneDeletesWithId;
     private SchemaNameAdjuster schemaNameAdjuster;
-    private final Field.Set configFields = CONFIG_FIELDS.with(ARRAY_ENCODING, FLATTEN_STRUCT, DELIMITER);
+    private final Field.Set configFields = CONFIG_FIELDS.with(ARRAY_ENCODING, BSON_TIMESTAMP_HANDLING_MODE, FLATTEN_STRUCT, DELIMITER);
 
     @Override
     public void configure(final Map<String, ?> configs) {
@@ -177,13 +224,15 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
         converter = new MongoDataConverter(
                 ArrayEncoding.parse(config.getString(ARRAY_ENCODING)),
                 FieldNameSelector.defaultNonRelationalSelector(fieldNameAdjuster),
-                fieldNameAdjustmentMode != FieldNameAdjustmentMode.NONE);
+                fieldNameAdjustmentMode != FieldNameAdjustmentMode.NONE,
+                BsonTimestampHandlingMode.parse(config.getString(BSON_TIMESTAMP_HANDLING_MODE)));
 
         flattenStruct = config.getBoolean(FLATTEN_STRUCT);
         delimiter = config.getString(DELIMITER);
         rewriteTombstoneDeletesWithId = config.getBoolean(REWRITE_TOMBSTONE_DELETES_WITH_ID);
 
-        keyExtractor = ConnectRecordUtil.extractKeyDelegate("id");
+        keyExtractor = ConnectRecordUtil.extractKeyDelegate(MongoDbFieldName.ID);
+        documentKeyExtractor = ConnectRecordUtil.extractKeyDelegate(MongoDbFieldName.DOCUMENT_KEY);
         recordFlattener = ConnectRecordUtil.flattenValueDelegate(delimiter);
     }
 
@@ -198,9 +247,12 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
             headersToAdd.forEach(h -> record.headers().add(h));
         }
 
-        final R keyRecord = keyExtractor.apply(record);
+        final boolean keyHoldsDocumentKey = holdsDocumentKey(record.keySchema());
+        final String keyFieldName = keyHoldsDocumentKey ? MongoDbFieldName.DOCUMENT_KEY : MongoDbFieldName.ID;
+        final R keyRecord = (keyHoldsDocumentKey ? documentKeyExtractor : keyExtractor).apply(record);
 
-        BsonDocument keyDocument = BsonDocument.parse("{ \"id\" : " + keyRecord.key().toString() + "}");
+        BsonDocument keyDocument = BsonDocument.parse("{ \"" + keyFieldName + "\" : " + keyRecord.key().toString() + "}");
+        BsonValue documentId = documentIdOf(keyDocument, keyFieldName, keyHoldsDocumentKey);
         BsonDocument valueDocument = new BsonDocument();
 
         // Handling tombstone record
@@ -236,18 +288,19 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
         // insert || replace || update with capture.mode="change_streams_update_full" or "change_streams_update_full_with_pre_image"
         if (newRecord.value() != null) {
             valueDocument = getFullDocument(newRecord, keyDocument);
+            applyRemovedFields(valueDocument, updateDescriptionRecord);
         }
 
         // update
         if (newRecord.value() == null && updateDescriptionRecord.value() != null) {
-            valueDocument = getPartialUpdateDocument(newRecord, updateDescriptionRecord, keyDocument);
+            valueDocument = getPartialUpdateDocument(newRecord, updateDescriptionRecord, documentId);
         }
 
         // add rewrite field
         if (extractRecordStrategy.isRewriteMode()) {
             valueDocument.append(DELETED_FIELD, new BsonBoolean(isDeletion));
-            if (rewriteTombstoneDeletesWithId && !valueDocument.containsKey("_id") && keyDocument.containsKey("id")) {
-                valueDocument.append("_id", keyDocument.get("id"));
+            if (rewriteTombstoneDeletesWithId && !valueDocument.containsKey("_id") && documentId != null) {
+                valueDocument.append("_id", documentId);
             }
         }
 
@@ -270,7 +323,24 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
     public void close() {
         super.close();
         keyExtractor.close();
+        documentKeyExtractor.close();
         recordFlattener.close();
+    }
+
+    /**
+     * Returns the {@code _id} of the document that the record key identifies. A key that holds the change stream
+     * documentKey carries the shard key fields as well, so the id has to be taken out of it.
+     */
+    private static BsonValue documentIdOf(BsonDocument keyDocument, String keyFieldName, boolean keyHoldsDocumentKey) {
+        BsonValue key = keyDocument.get(keyFieldName);
+        if (!keyHoldsDocumentKey || key == null || !key.isDocument()) {
+            return key;
+        }
+        return key.asDocument().getOrDefault("_id", key);
+    }
+
+    private static boolean holdsDocumentKey(Schema keySchema) {
+        return keySchema != null && keySchema.field(MongoDbFieldName.DOCUMENT_KEY) != null;
     }
 
     private R newRecord(R record, BsonDocument keyDocument, BsonDocument valueDocument) {
@@ -310,9 +380,8 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
             valueSchemaBuilder = SchemaBuilder.struct().name(newValueSchemaName);
             converter.buildSchema(valueMap, valueSchemaBuilder);
 
-            if (!additionalFields.isEmpty()) {
-                addAdditionalFieldsSchema(additionalFields, record, valueSchemaBuilder);
-            }
+            final List<FieldReference> presentAdditionalFields = additionalFields.isEmpty() ? List.of()
+                    : addAdditionalFieldsSchema(additionalFields, record, valueSchemaBuilder);
 
             valueSchema = valueSchemaBuilder.build();
             valueStruct = new Struct(valueSchema);
@@ -321,8 +390,8 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
                 converter.buildStruct(entry, valueSchema, valueStruct);
             }
 
-            if (!additionalFields.isEmpty()) {
-                addFields(additionalFields, record, valueStruct);
+            if (!presentAdditionalFields.isEmpty()) {
+                addFields(presentAdditionalFields, record, valueStruct);
             }
         }
 
@@ -336,12 +405,17 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
         return newRecord;
     }
 
-    private void addAdditionalFieldsSchema(List<FieldReference> additionalFields, R originalRecord, SchemaBuilder valueSchemaBuilder) {
+    private List<FieldReference> addAdditionalFieldsSchema(List<FieldReference> additionalFields, R originalRecord, SchemaBuilder valueSchemaBuilder) {
         Schema sourceSchema = originalRecord.valueSchema();
+        final List<FieldReference> presentFields = new ArrayList<>(additionalFields.size());
         for (FieldReference fieldReference : additionalFields) {
             Optional<Schema> fieldSchema = fieldReference.getSchema(sourceSchema);
-            fieldSchema.ifPresent(schema -> valueSchemaBuilder.field(fieldReference.getNewField(), schema));
+            if (fieldSchema.isPresent()) {
+                valueSchemaBuilder.field(fieldReference.getNewField(), fieldSchema.get());
+                presentFields.add(fieldReference);
+            }
         }
+        return presentFields;
     }
 
     private void addFields(List<FieldReference> additionalFields, R originalRecord, Struct value) {
@@ -353,7 +427,7 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
         }
     }
 
-    private BsonDocument getPartialUpdateDocument(R beforeRecord, R updateDescriptionRecord, BsonDocument keyDocument) {
+    private BsonDocument getPartialUpdateDocument(R beforeRecord, R updateDescriptionRecord, BsonValue documentId) {
         BsonDocument valueDocument = new BsonDocument();
 
         Struct updateDescription = requireStruct(updateDescriptionRecord.value(), MongoDbFieldName.UPDATE_DESCRIPTION);
@@ -374,12 +448,14 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
 
         if (removed != null) {
             for (String field : removed) {
-                valueDocument.keySet().remove(field);
+                // A field removed by $unset is represented with an explicit null value, so consumers
+                // (and relational sinks) can clear the previous value.
+                valueDocument.append(field, BsonNull.VALUE);
             }
         }
 
         if (!valueDocument.containsKey("_id")) {
-            valueDocument.append("_id", keyDocument.get("id"));
+            valueDocument.append("_id", documentId);
         }
 
         if (flattenStruct) {
@@ -393,6 +469,40 @@ public class ExtractNewDocumentState<R extends ConnectRecord<R>> extends Abstrac
 
     private BsonDocument getFullDocument(R record, BsonDocument key) {
         return BsonDocument.parse(record.value().toString());
+    }
+
+    /**
+     * Represents each field listed in {@code updateDescription.removedFields} with an explicit null
+     * value: a full document no longer contains a field removed by {@code $unset}, so without this
+     * the field would silently disappear from the emitted record instead of being nulled out.
+     */
+    private void applyRemovedFields(BsonDocument valueDocument, R updateDescriptionRecord) {
+        if (updateDescriptionRecord.value() == null) {
+            return;
+        }
+        final Struct updateDescription = requireStruct(updateDescriptionRecord.value(), MongoDbFieldName.UPDATE_DESCRIPTION);
+        final List<String> removed = updateDescription.getArray(MongoDbFieldName.REMOVED_FIELDS);
+        if (removed == null) {
+            return;
+        }
+        for (String path : removed) {
+            setRemovedFieldToNull(valueDocument, path);
+        }
+    }
+
+    private static void setRemovedFieldToNull(BsonDocument document, String path) {
+        final String[] segments = path.split("\\.");
+        BsonDocument current = document;
+        for (int i = 0; i < segments.length - 1; i++) {
+            final BsonValue parent = current.get(segments[i]);
+            if (parent == null || !parent.isDocument()) {
+                // The enclosing document was itself removed or the path points into an array
+                // element; there is no remaining field to represent with a null value.
+                return;
+            }
+            current = parent.asDocument();
+        }
+        current.put(segments[segments.length - 1], BsonNull.VALUE);
     }
 
     @Override

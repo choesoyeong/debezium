@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -312,6 +313,7 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                         LOGGER.info("Incremental snapshot for table '{}' will end at position {}", currentTableId,
                                 maybeRedactSensitiveData(context.maximumKey().orElse(new Object[0])));
                     }
+                    context.totalRows(resolveTotalRowCount(currentTable, context.currentDataCollectionId().getAdditionalCondition(), maximumKey));
                 }
 
                 try {
@@ -333,7 +335,7 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                         }
                         else {
 
-                            notificationService.incrementalSnapshotNotificationService().notifyInProgress(context, partition, offsetContext);
+                            notificationService.incrementalSnapshotNotificationService().notifyInProgress(context, partition, offsetContext, totalRowsScanned);
                             break;
                         }
                     }
@@ -531,6 +533,7 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
             notificationService.incrementalSnapshotNotificationService().notifyStarted(context, partition, offsetContext);
 
             progressListener.monitoredDataCollectionsDetermined(partition, monitoredDataCollections);
+            notificationService.incrementalSnapshotNotificationService().notifyDataCollectionsResolved(context, partition, offsetContext);
             readChunk(partition, offsetContext);
         }
     }
@@ -631,19 +634,17 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
             LOGGER.info("Removed current collection '{}' from incremental snapshot collection list.", stopCurrentTableId);
             tableScanCompleted(partition);
             stopped.add(stopCurrentTableId.identifier());
+            context.nextDataCollection();
             // If snapshot has no more collections, abort; otherwise advance to the next collection.
             if (!context.snapshotRunning()) {
                 LOGGER.info("Incremental snapshot has stopped.");
                 progressListener.snapshotAborted(partition);
+                notificationService.incrementalSnapshotNotificationService().notifyAborted(context, partition, offsetContext, stopped);
+                context.unsetCorrelationId();
             }
             else {
                 LOGGER.info("Advancing to next available collection in the incremental snapshot.");
-                nextDataCollection(partition, offsetContext);
             }
-        }
-        notificationService.incrementalSnapshotNotificationService().notifyAborted(context, partition, offsetContext, stopped);
-        if (!context.snapshotRunning()) {
-            context.unsetCorrelationId();
         }
         LOGGER.info("Removed collections from incremental snapshot: '{}'", stopped);
     }
@@ -656,15 +657,57 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
 
         return dataCollectionIds
                 .stream()
-                .flatMap(x -> {
-                    final List<String> ids = databaseSchema
-                            .tableIds()
-                            .stream()
-                            .map(TableId::identifier)
-                            .filter(t -> Pattern.compile(x).matcher(t).matches())
-                            .collect(Collectors.toList());
-                    return ids.isEmpty() ? Stream.of(x) : ids.stream();
-                }).distinct().collect(Collectors.toList());
+                .flatMap(this::expandDataCollectionId)
+                .distinct()
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Expands a single, possibly regex-based, data collection id to the ids of the data collections it
+     * matches. An id matching none may still be the literal id of a data collection, spelled in another
+     * case than the declared one, so it is reported as the declared id of that data collection. Otherwise it
+     * is kept as it is, as it may address a data collection the database schema does not know about.
+     */
+    private Stream<String> expandDataCollectionId(String dataCollectionId) {
+
+        final Pattern pattern = Pattern.compile(dataCollectionId);
+        final List<String> ids = databaseSchema
+                .tableIds()
+                .stream()
+                .filter(tableId -> pattern.matcher(tableId.identifier()).matches())
+                .map(this::toDeclaredIdentifier)
+                .collect(Collectors.toList());
+        return ids.isEmpty() ? Stream.of(toDeclaredIdentifier(dataCollectionId)) : ids.stream();
+    }
+
+    /**
+     * Returns the declared id of the data collection a literal data collection id identifies, or the given id
+     * as it is, if it identifies none. The id may as well be a regular expression that did not match any
+     * data collection, which need not even parse as a table id. The id is parsed the way the connector parses
+     * table ids, so that it has the parts the connector's own ids have, which the table filter evaluates.
+     */
+    private String toDeclaredIdentifier(String dataCollectionId) {
+
+        try {
+            final TableId tableId = TableId.parse(dataCollectionId, connectorConfig.useCatalogBeforeSchema());
+            final Table table = tableId != null ? databaseSchema.tableFor(tableId) : null;
+            return table != null ? table.id().identifier() : dataCollectionId;
+        }
+        catch (IllegalArgumentException e) {
+            return dataCollectionId;
+        }
+    }
+
+    /**
+     * Returns the id of a data collection the way the database schema declares it. A connector whose data
+     * collection ids are case-insensitive keys its schema by the lower-cased ids, while the tables keep the
+     * case they were declared with. Only the declared id identifies the data collection in the snapshot
+     * context, so it is the one an expanded id has to be reported as.
+     */
+    private String toDeclaredIdentifier(TableId tableId) {
+
+        final Table table = databaseSchema.tableFor(tableId);
+        return table != null ? table.id().identifier() : tableId.identifier();
     }
 
     /**
@@ -765,6 +808,36 @@ public abstract class AbstractIncrementalSnapshotChangeEventSource<P extends Par
                 .tableId(currentTable.id())
                 .addColumns(columns)
                 .create();
+    }
+
+    /**
+     * Resolves the best-effort total number of rows the incremental snapshot will scan for the current table.
+     * <p>
+     * When no row filter is present and the connector exposes a positive metadata estimate, the (constant-time)
+     * estimate is used; otherwise a bounded exact {@code COUNT(1)} (rows with key {@code <= maximumKey}) is used. A
+     * non-positive estimate (e.g. a table that has never been analyzed, whose statistics report zero rows) is treated
+     * as unavailable so the exact count is used instead of reporting a misleading total for a populated table. Any
+     * failure resolves to {@link OptionalLong#empty()} so the snapshot is neither failed nor slowed and the per-table
+     * progress fields are simply omitted.
+     * <p>
+     * The estimate is best-effort: when it is used it may differ from the number of rows actually scanned (statistics
+     * lag, or rows inserted after the snapshot's {@code maximumKey} was fixed), so the derived progress can settle
+     * slightly short of, or reach, 100% before the scan truly completes. It never reports more than 100%.
+     */
+    protected OptionalLong resolveTotalRowCount(Table table, Optional<String> additionalCondition, Object[] maximumKey) {
+        try {
+            if (additionalCondition.isEmpty()) {
+                final OptionalLong estimate = chunkQueryBuilder.estimateRowCount(context, table);
+                if (estimate.isPresent() && estimate.getAsLong() > 0) {
+                    return estimate;
+                }
+            }
+            return chunkQueryBuilder.countRows(context, table, additionalCondition, maximumKey);
+        }
+        catch (RuntimeException e) {
+            LOGGER.warn("Unable to resolve total row count for table '{}' during incremental snapshot; per-table progress will be omitted", table.id(), e);
+            return OptionalLong.empty();
+        }
     }
 
     private void incrementTableRowsScanned(P partition, long rows) {

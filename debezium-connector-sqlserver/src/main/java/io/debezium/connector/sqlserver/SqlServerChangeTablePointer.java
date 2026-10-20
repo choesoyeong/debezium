@@ -9,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -17,6 +18,7 @@ import java.util.Map;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import io.debezium.annotation.VisibleForTesting;
 import io.debezium.jdbc.JdbcConnection.ResultSetMapper;
 import io.debezium.pipeline.source.spi.ChangeTableResultSet;
 import io.debezium.relational.Column;
@@ -78,8 +80,12 @@ public class SqlServerChangeTablePointer extends ChangeTableResultSet<SqlServerC
 
     @Override
     protected Object getColumnData(ResultSet resultSet, int columnIndex) throws SQLException {
-        if (resultSet.getMetaData().getColumnType(columnIndex) == Types.TIME) {
+        int columnType = resultSet.getMetaData().getColumnType(columnIndex);
+        if (columnType == Types.TIME) {
             return resultSet.getTimestamp(columnIndex);
+        }
+        else if (columnType == Types.TIMESTAMP) {
+            return resultSet.getObject(columnIndex, LocalDateTime.class);
         }
         return super.getColumnData(resultSet, columnIndex);
     }
@@ -231,20 +237,24 @@ public class SqlServerChangeTablePointer extends ChangeTableResultSet<SqlServerC
     /**
      * Check whether a column was changed based on the CDC {@code __$update_mask} bitmask.
      *
-     * <p>The update mask is a {@code varbinary} value where each bit corresponds to a
-     * captured column in ordinal order. A bit value of 1 indicates the column was modified.
+     * <p>The update mask is a {@code varbinary} value with one bit per captured column, where a bit
+     * value of 1 indicates the column was modified. The column with ordinal 1 is the lowest bit of
+     * the <em>last</em> byte of the mask and higher ordinals continue towards its first byte, the
+     * same layout {@code sys.fn_cdc_is_bit_set} reads with
+     * {@code SUBSTRING(mask, DATALENGTH(mask) - (ordinal - 1) / 8, 1)}.
      *
      * @param updateMask the raw update mask bytes from the CDC result set
      * @param columnIndex the 0-based index of the column in the captured column list
      * @return {@code true} if the column was changed, or if the mask is unavailable
      */
-    private static boolean isColumnChanged(byte[] updateMask, int columnIndex) {
+    @VisibleForTesting
+    static boolean isColumnChanged(byte[] updateMask, int columnIndex) {
         if (updateMask == null) {
             return true;
         }
-        final int byteIndex = columnIndex / 8;
+        final int byteIndex = updateMask.length - 1 - columnIndex / 8;
         final int bitIndex = columnIndex % 8;
-        if (byteIndex >= updateMask.length) {
+        if (byteIndex < 0) {
             return true;
         }
         return (updateMask[byteIndex] & (1 << bitIndex)) != 0;

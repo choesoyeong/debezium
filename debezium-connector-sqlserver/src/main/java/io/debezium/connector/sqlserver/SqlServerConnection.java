@@ -18,6 +18,7 @@ import java.sql.SQLException;
 import java.sql.Types;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -28,6 +29,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
@@ -75,22 +77,24 @@ public class SqlServerConnection extends JdbcConnection {
     private static final String PREFIX_CDC_DATA = "[cdc_data].";
     private static final String GET_ALL_CHANGES_FUNCTION_PREFIX = "fn_cdc_get_all_changes_";
     private static final String GET_MAX_LSN = "SELECT #db.sys.fn_cdc_get_max_lsn()";
-    private static final String GET_MAX_TRANSACTION_LSN = "SELECT MAX(start_lsn) FROM #db.cdc.lsn_time_mapping WHERE tran_id <> 0x00";
-    private static final String GET_NTH_TRANSACTION_LSN_FROM_BEGINNING = "SELECT MAX(start_lsn) FROM (SELECT TOP (?) start_lsn FROM #db.cdc.lsn_time_mapping WHERE tran_id <> 0x00 ORDER BY start_lsn) as next_lsns";
-    private static final String GET_NTH_TRANSACTION_LSN_FROM_LAST = "SELECT MAX(start_lsn) FROM (SELECT TOP (? + 1) start_lsn FROM #db.cdc.lsn_time_mapping WHERE start_lsn >= ? AND tran_id <> 0x00 ORDER BY start_lsn) as next_lsns";
+    private static final String GET_MAX_TRANSACTION_LSN = "SELECT MAX(start_lsn) FROM #db.cdc.lsn_time_mapping WITH (NOLOCK) WHERE tran_id <> 0x00";
+    private static final String GET_NTH_TRANSACTION_LSN_FROM_BEGINNING = "SELECT MAX(start_lsn) FROM (SELECT TOP (?) start_lsn FROM #db.cdc.lsn_time_mapping WITH (NOLOCK) WHERE tran_id <> 0x00 ORDER BY start_lsn) as next_lsns";
+    private static final String GET_NTH_TRANSACTION_LSN_FROM_LAST = "SELECT MAX(start_lsn) FROM (SELECT TOP (? + 1) start_lsn FROM #db.cdc.lsn_time_mapping WITH (NOLOCK) WHERE start_lsn >= ? AND tran_id <> 0x00 ORDER BY start_lsn) as next_lsns";
 
     private static final String GET_MIN_LSN = "SELECT #db.sys.fn_cdc_get_min_lsn(?)";
     private static final String LOCK_TABLE = "SELECT * FROM #table WITH (TABLOCKX)";
     private static final String INCREMENT_LSN = "SELECT #db.sys.fn_cdc_increment_lsn(?)";
-    protected static final String LSN_TIMESTAMP_SELECT_STATEMENT = "TODATETIMEOFFSET(#db.sys.fn_cdc_map_lsn_to_time([__$start_lsn]), DATEPART(TZOFFSET, SYSDATETIMEOFFSET()))";
     private static final String LSN_TIMESTAMP_SELECT_STATEMENT_JOIN = "TODATETIMEOFFSET(ltm.tran_end_time, DATEPART(TZOFFSET, SYSDATETIMEOFFSET()))";
-    private static final String GET_ALL_CHANGES_FOR_TABLE_SELECT = "SELECT [__$start_lsn], [__$seqval], [__$operation], [__$update_mask], #, "
-            + LSN_TIMESTAMP_SELECT_STATEMENT;
+    private static final String GET_ALL_CHANGES_FOR_TABLE_SELECT = "SELECT cdc_data.[__$start_lsn], cdc_data.[__$seqval], cdc_data.[__$operation], cdc_data.[__$update_mask], #, "
+            + LSN_TIMESTAMP_SELECT_STATEMENT_JOIN;
     private static final String GET_ALL_CHANGES_FOR_TABLE_SELECT_DIRECT = "SELECT cdc_data.[__$start_lsn], cdc_data.[__$seqval], cdc_data.[__$operation], cdc_data.[__$update_mask], cdc_data.[__$command_id], #, "
             + LSN_TIMESTAMP_SELECT_STATEMENT_JOIN;
-    private static final String GET_ALL_CHANGES_FOR_TABLE_FROM_FUNCTION = "FROM #db.cdc.#function(?, ?, N'all update old')";
-    private static final String GET_ALL_CHANGES_FOR_TABLE_FROM_DIRECT = "FROM #db.cdc.#table AS cdc_data WITH (NOLOCK) LEFT JOIN #db.cdc.lsn_time_mapping ltm ON ltm.start_lsn = cdc_data.[__$start_lsn]";
-    private static final String GET_ALL_CHANGES_FOR_TABLE_FROM_FUNCTION_ORDER_BY = "ORDER BY [__$start_lsn] ASC, [__$seqval] ASC, [__$operation] ASC";
+    // FUNCTION mode's table-valued function already bounds its output to the requested LSN range internally, so
+    // joining it against lsn_time_mapping here only changes how the commit timestamp is computed, not which rows
+    // are returned - consistent with the same rewrite already applied to DIRECT mode (see debezium/dbz#1915).
+    private static final String GET_ALL_CHANGES_FOR_TABLE_FROM_FUNCTION = "FROM #db.cdc.#function(?, ?, N'all update old') AS cdc_data LEFT JOIN #db.cdc.lsn_time_mapping ltm WITH (NOLOCK) ON ltm.start_lsn = cdc_data.[__$start_lsn]";
+    private static final String GET_ALL_CHANGES_FOR_TABLE_FROM_DIRECT = "FROM #db.cdc.#table AS cdc_data WITH (NOLOCK) LEFT JOIN #db.cdc.lsn_time_mapping ltm WITH (NOLOCK) ON ltm.start_lsn = cdc_data.[__$start_lsn]";
+    private static final String GET_ALL_CHANGES_FOR_TABLE_FROM_FUNCTION_ORDER_BY = "ORDER BY cdc_data.[__$start_lsn] ASC, cdc_data.[__$seqval] ASC, cdc_data.[__$operation] ASC";
     private static final String GET_ALL_CHANGES_FOR_TABLE_FROM_DIRECT_ORDER_BY = "ORDER BY cdc_data.[__$start_lsn] ASC, cdc_data.[__$command_id] ASC, cdc_data.[__$seqval] ASC, cdc_data.[__$operation] ASC";
     private static final String GET_CDC_JOB_INFO = "{call sys.sp_cdc_help_jobs}";
     private static final String CDC_JOB_INFO_JOB_TYPE_COLUMN_NAME = "job_type";
@@ -119,22 +123,20 @@ public class SqlServerConnection extends JdbcConnection {
      * Queries the list of capture instances in the given database.
      *
      * If two or more capture instances with the same start LSN are available for a given source table,
-     * only the newest one will be returned.
+     * only the newest one that passes the capture instance filter is kept, see {@link #getChangeTables(String, Lsn)}.
      *
      * We use a query instead of {@code sys.sp_cdc_help_change_data_capture} because:
      *   1. The stored procedure doesn't allow filtering capture instances by start LSN.
      *   2. There is no way to use the result returned by a stored procedure in a query.
      */
-    private static final String GET_CHANGE_TABLES = "WITH ordered_change_tables" +
-            " AS (SELECT ROW_NUMBER() OVER (PARTITION BY ct.source_object_id, ct.start_lsn ORDER BY ct.create_date DESC) AS ct_sequence," +
-            " ct.*" +
-            " FROM #db.cdc.change_tables AS ct#)" +
-            " SELECT OBJECT_SCHEMA_NAME(source_object_id, DB_ID(?))," +
-            " OBJECT_NAME(source_object_id, DB_ID(?))," +
-            " capture_instance," +
-            " object_id," +
-            " start_lsn" +
-            " FROM ordered_change_tables WHERE ct_sequence = 1";
+    private static final String GET_CHANGE_TABLES = "SELECT OBJECT_SCHEMA_NAME(ct.source_object_id, DB_ID(?))," +
+            " OBJECT_NAME(ct.source_object_id, DB_ID(?))," +
+            " ct.capture_instance," +
+            " ct.object_id," +
+            " ct.start_lsn," +
+            " ct.source_object_id" +
+            " FROM #db.cdc.change_tables AS ct#" +
+            " ORDER BY ct.source_object_id, ct.start_lsn, ct.create_date DESC";
 
     private static final String GET_NEW_CHANGE_TABLES = "SELECT * FROM #db.cdc.change_tables WHERE start_lsn BETWEEN ? AND ?";
     private static final String GET_MIN_LSN_FROM_ALL_CHANGE_TABLES = "select min(start_lsn) from #db.cdc.change_tables";
@@ -196,8 +198,9 @@ public class SqlServerConnection extends JdbcConnection {
         this.optionRecompile = optionRecompile;
     }
 
-    private String buildGetAllChangesForTableQuery(SqlServerConnectorConfig.DataQueryMode dataQueryMode,
-                                                   Set<Envelope.Operation> skippedOperations) {
+    @VisibleForTesting
+    String buildGetAllChangesForTableQuery(SqlServerConnectorConfig.DataQueryMode dataQueryMode,
+                                           Set<Envelope.Operation> skippedOperations) {
         boolean isDirectMode = dataQueryMode == SqlServerConnectorConfig.DataQueryMode.DIRECT;
         String result;
         List<String> where = new LinkedList<>();
@@ -224,10 +227,10 @@ public class SqlServerConnection extends JdbcConnection {
             where.add("[cdc_data].[__$start_lsn] >= ?");
         }
         else {
-            where.add("(([__$start_lsn] = ? AND [__$seqval] = ? AND [__$operation] > ?) " +
-                    "OR ([__$start_lsn] = ? AND [__$seqval] > ?) " +
-                    "OR ([__$start_lsn] > ?))");
-            where.add("[__$start_lsn] <= ?");
+            where.add("(([cdc_data].[__$start_lsn] = ? AND [cdc_data].[__$seqval] = ? AND [cdc_data].[__$operation] > ?) " +
+                    "OR ([cdc_data].[__$start_lsn] = ? AND [cdc_data].[__$seqval] > ?) " +
+                    "OR ([cdc_data].[__$start_lsn] > ?))");
+            where.add("[cdc_data].[__$start_lsn] <= ?");
         }
 
         if (hasSkippedOperations(skippedOperations)) {
@@ -248,8 +251,8 @@ public class SqlServerConnection extends JdbcConnection {
                         break;
                 }
             });
-            String colPrefix = isDirectMode ? PREFIX_CDC_DATA : "";
-            where.add(colPrefix + "[__$operation] NOT IN (" + String.join(",", skippedOps) + ")");
+            // Both modes alias their result set as cdc_data now that FUNCTION mode also joins lsn_time_mapping.
+            where.add(PREFIX_CDC_DATA + "[__$operation] NOT IN (" + String.join(",", skippedOps) + ")");
         }
 
         if (!where.isEmpty()) {
@@ -436,9 +439,10 @@ public class SqlServerConnection extends JdbcConnection {
                                         Integer commandIdFrom, Lsn intervalToLsn, int maxRows)
             throws SQLException {
         String databaseName = changeTable.getSourceTableId().catalog();
-        boolean isDirectMode = config.getDataQueryMode() == SqlServerConnectorConfig.DataQueryMode.DIRECT;
+        // Both modes now alias their result set as cdc_data (FUNCTION mode joins lsn_time_mapping the same way
+        // DIRECT mode does), so captured columns are qualified the same way regardless of query mode.
         String capturedColumns = changeTable.getCapturedColumns().stream().map(this::quoteIdentifier)
-                .map(column -> isDirectMode ? PREFIX_CDC_DATA + column : column)
+                .map(column -> PREFIX_CDC_DATA + column)
                 .collect(Collectors.joining(", "));
 
         String query = replaceDatabaseNamePlaceholder(getAllChangesForTable, databaseName)
@@ -594,18 +598,29 @@ public class SqlServerConnection extends JdbcConnection {
                 });
         final ResultSetMapper<List<SqlServerChangeTable>> mapper = rs -> {
             final List<SqlServerChangeTable> changeTables = new ArrayList<>();
+            int previousSourceObjectId = 0;
+            Lsn previousStartLsn = null;
             while (rs.next()) {
                 final String captureInstance = rs.getString(3);
                 if (!config.getCaptureInstanceFilter().test(captureInstance)) {
                     continue;
                 }
+                final int sourceObjectId = rs.getInt(6);
+                final Lsn startLsn = Lsn.valueOf(rs.getBytes(5));
+                // Rows of one (source table, start LSN) pair arrive newest first; keep only the first one
+                // that passed the filter, so an excluded capture instance cannot shadow an included one
+                if (sourceObjectId == previousSourceObjectId && startLsn.equals(previousStartLsn)) {
+                    continue;
+                }
+                previousSourceObjectId = sourceObjectId;
+                previousStartLsn = startLsn;
                 int changeTableObjectId = rs.getInt(4);
                 changeTables.add(
                         new SqlServerChangeTable(
                                 new TableId(databaseName, rs.getString(1), rs.getString(2)),
                                 captureInstance,
                                 changeTableObjectId,
-                                Lsn.valueOf(rs.getBytes(5)),
+                                startLsn,
                                 columns.get(changeTableObjectId)));
             }
             return changeTables;
@@ -616,9 +631,9 @@ public class SqlServerConnection extends JdbcConnection {
         if (toLsn.isAvailable()) {
             return prepareQueryAndMap(query.replace(STATEMENTS_PLACEHOLDER, " WHERE ct.start_lsn <= ?"),
                     ps -> {
-                        ps.setBytes(1, toLsn.getBinary());
+                        ps.setString(1, databaseName);
                         ps.setString(2, databaseName);
-                        ps.setString(3, databaseName);
+                        ps.setBytes(3, toLsn.getBinary());
                     },
                     mapper);
         }
@@ -743,6 +758,9 @@ public class SqlServerConnection extends JdbcConnection {
         if (columnType == Types.TIME) {
             return rs.getTimestamp(columnIndex);
         }
+        else if (columnType == Types.TIMESTAMP) {
+            return rs.getObject(columnIndex, LocalDateTime.class);
+        }
         else {
             return super.getColumnValue(rs, columnIndex, column, table);
         }
@@ -844,6 +862,14 @@ public class SqlServerConnection extends JdbcConnection {
     }
 
     @Override
+    public String buildSelectRowCount(TableId tableId) {
+        // COUNT returns a 32-bit int in T-SQL and overflows with "Arithmetic overflow error converting expression
+        // to data type int" on tables with more than Integer.MAX_VALUE rows, before any value reaches the driver.
+        // COUNT_BIG returns a bigint and is the documented remedy.
+        return "SELECT COUNT_BIG(1) FROM %s".formatted(quotedTableIdString(tableId));
+    }
+
+    @Override
     public Optional<Boolean> nullsSortLast() {
         // "Null values are treated as the lowest possible values"
         // https://learn.microsoft.com/en-us/sql/t-sql/queries/select-order-by-clause-transact-sql?view=sql-server-ver16
@@ -855,6 +881,30 @@ public class SqlServerConnection extends JdbcConnection {
         return Stream.of(tableId.catalog(), tableId.schema(), tableId.table())
                 .map(this::quoteIdentifier)
                 .collect(Collectors.joining("."));
+    }
+
+    @Override
+    public OptionalLong readRowCountEstimate(TableId tableId) {
+        // sys.partitions.rows holds the maintained row count for the heap or clustered index (index_id 0 or 1).
+        // It is read from the target database's catalog and only relies on the metadata visibility that
+        // db_datareader already grants (no VIEW DATABASE STATE required). Best-effort: only used when no filter is present.
+        final String query = "SELECT SUM(p.rows) FROM " + quoteIdentifier(tableId.catalog())
+                + ".sys.partitions p WHERE p.object_id = OBJECT_ID(?) AND p.index_id IN (0, 1)";
+        try {
+            return prepareQueryAndMap(query,
+                    statement -> statement.setString(1, quotedTableIdString(tableId)),
+                    rs -> {
+                        if (rs.next()) {
+                            final long estimate = rs.getLong(1);
+                            return rs.wasNull() ? OptionalLong.empty() : OptionalLong.of(estimate);
+                        }
+                        return OptionalLong.empty();
+                    });
+        }
+        catch (SQLException e) {
+            LOGGER.warn("Unable to read row count estimate for table '{}' from sys.partitions; incremental snapshot will fall back to an exact count", tableId, e);
+            return OptionalLong.empty();
+        }
     }
 
     private String replaceDatabaseNamePlaceholder(String sql, String databaseName) {
